@@ -24,51 +24,72 @@ DEFAULT_OUTPUT = Path("data/site_sources/helinsilver/api/live-price.json")
 MAX_HISTORY_DAYS = 90  # Keep 90 days of trend data
 
 
-async def fetch_silver_price() -> Optional[dict]:
-    """Fetch current silver spot price from Yahoo Finance.
+async def fetch_silver_price(history_days: int = 30) -> Optional[dict]:
+    """Fetch current silver spot price + historical data from Yahoo Finance.
 
-    Falls back to multiple sources if primary fails.
+    Uses COMEX Silver Futures (SI=F) as the benchmark.
 
-    Returns dict with: price, change, change_pct, high, low, source, updated
+    Returns dict with: price, change, change_pct, high, low, history, source, updated
     """
-    # Primary: Yahoo Finance — Silver Futures (SI=F)
     try:
         async with httpx.AsyncClient(timeout=15) as client:
+            # Fetch 30-day history (includes current price)
             resp = await client.get(
                 "https://query1.finance.yahoo.com/v8/finance/chart/SI=F",
-                params={"range": "1d", "interval": "1d"},
+                params={"range": "1mo", "interval": "1d"},
                 headers={"User-Agent": "Mozilla/5.0"},
             )
             resp.raise_for_status()
             data = resp.json()
             result = data["chart"]["result"][0]
             meta = result["meta"]
-            quote = result["indicators"]["quote"][0]
+            timestamps = result["timestamp"]
+            quotes = result["indicators"]["quote"][0]
 
             price = meta.get("regularMarketPrice", 0)
             prev_close = meta.get("previousClose", price)
-            change = round(price - prev_close, 2)
+            change = round(price - prev_close, 2) if prev_close else 0
             change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
 
-            high_vals = [v for v in quote.get("high", []) if v]
-            low_vals = [v for v in quote.get("low", []) if v]
+            # Build real historical data from daily closes
+            history = []
+            for i in range(len(timestamps)):
+                close_val = quotes["close"][i]
+                if close_val is None:
+                    continue
+                dt = datetime.fromtimestamp(timestamps[i], tz=timezone.utc).strftime("%Y-%m-%d")
+                high_val = quotes["high"][i]
+                low_val = quotes["low"][i]
+                history.append({
+                    "date": dt,
+                    "price": round(close_val, 2),
+                    "high": round(high_val, 2) if high_val else round(close_val, 2),
+                    "low": round(low_val, 2) if low_val else round(close_val, 2),
+                })
 
-            logger.info(f"Silver price: ${price:.2f} ({change:+.2f}, {change_pct:+.2f}%)")
+            # 24h high/low from the most recent day's range
+            recent_highs = [h["high"] for h in history[-3:]]
+            recent_lows = [h["low"] for h in history[-3:]]
+
+            logger.info(
+                f"Silver price: ${price:.2f} ({change:+.2f}, {change_pct:+.2f}%), "
+                f"{len(history)} days history"
+            )
             return {
                 "price": round(price, 2),
                 "change": change,
                 "change_pct": change_pct,
-                "high_24h": round(max(high_vals), 2) if high_vals else price,
-                "low_24h": round(min(low_vals), 2) if low_vals else price,
+                "high_24h": round(max(recent_highs), 2) if recent_highs else price,
+                "low_24h": round(min(recent_lows), 2) if recent_lows else price,
                 "source": "yahoo_finance",
                 "updated": datetime.now(timezone.utc).isoformat(),
                 "currency": "USD",
                 "unit": "troy_ounce",
+                "history": history,
             }
     except Exception as e:
         logger.warning(f"Yahoo Finance failed: {e}")
 
-    # Fallback: use approximation (last known price)
     logger.error("All price sources failed")
     return None
 
@@ -84,45 +105,14 @@ def load_history(output_path: Path) -> dict:
 
 
 def save_price_data(price_data: dict, output_path: Path) -> None:
-    """Save price data with rolling history."""
-    existing = load_history(output_path)
-
-    # Add current price to history
-    history = existing.get("history", [])
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    # Update today's entry or create new one
-    updated = False
-    for entry in history:
-        if entry.get("date") == today:
-            entry.update({
-                "price": price_data["price"],
-                "change": price_data.get("change", 0),
-                "high": price_data.get("high_24h", price_data["price"]),
-                "low": price_data.get("low_24h", price_data["price"]),
-            })
-            updated = True
-            break
-
-    if not updated:
-        history.append({
-            "date": today,
-            "price": price_data["price"],
-            "change": price_data.get("change", 0),
-            "high": price_data.get("high_24h", price_data["price"]),
-            "low": price_data.get("low_24h", price_data["price"]),
-        })
-
-    # Trim history
-    history = history[-MAX_HISTORY_DAYS:]
-
-    output = {**price_data, "history": history}
+    """Save price data with history."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
-        json.dumps(output, ensure_ascii=False, indent=2),
+        json.dumps(price_data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    logger.info(f"Updated {output_path}: ${price_data['price']:.2f}, {len(history)} days history")
+    history_len = len(price_data.get("history", []))
+    logger.info(f"Updated {output_path}: ${price_data['price']:.2f}, {history_len} days history")
 
 
 async def main(output_path: Path | None = None):
