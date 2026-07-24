@@ -11,6 +11,10 @@ targets:
       local_path: "data/site_sources/helinsilver"
     sitemap_url: "https://www.helinsilver.com/sitemap.xml"
     excluded_patterns: []
+    planning:
+      goal: "qualified_inquiries"
+      priority_url_patterns: ["/products/", "/contact/"]
+      protected_url_patterns: ["/privacy/", "/terms/"]
     default_og_image: "https://www.helinsilver.com/images/silver-ingots.jpg"
     default_og_image_width: 1200
     default_og_image_height: 630

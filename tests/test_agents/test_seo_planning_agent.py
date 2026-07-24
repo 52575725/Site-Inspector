@@ -6,6 +6,12 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
+from src.agents.planning_context import (
+    BusinessObjective,
+    FeedbackSummary,
+    PageSignals,
+    PlanningContext,
+)
 from src.agents.seo_planning_agent import PlanningPolicy, SEOPlanningAgent
 from src.cli.main import app
 
@@ -121,6 +127,69 @@ def test_executable_allowlist_rechecks_all_safety_invariants():
 
 
 @pytest.mark.asyncio
+async def test_business_goal_and_live_signals_change_action_order():
+    planner = SEOPlanningAgent([
+        FakeFixer("meta_fixer", "fully_auto", ["missing_title", "missing_meta_description"]),
+    ])
+    priority_url = "https://example.com/products/high-value/"
+    context = PlanningContext(
+        objective=BusinessObjective(
+            goal="qualified_inquiries",
+            priority_url_patterns=["/products/"],
+        ),
+        page_signals={
+            priority_url: PageSignals(gsc_position=8, gsc_ctr=0.01, ga_pageviews=500),
+        },
+    )
+    plan = await planner.create_plan(
+        [
+            issue(1, "missing_title", 0.6, url=priority_url),
+            issue(2, "missing_meta_description", 0.9, url="https://example.com/blog/post/"),
+        ],
+        scan_id=12,
+        target_name="example",
+        context=context,
+    )
+
+    assert plan.actions[0].categories == ["missing_title"]
+    assert plan.actions[0].business_value == 0.95
+    assert plan.actions[0].opportunity_score > 0.7
+    assert "priority business page" in plan.actions[0].decision_factors
+    assert plan.facts["signal_pages"] == 1
+
+
+@pytest.mark.asyncio
+async def test_protected_pages_and_degraded_history_require_approval():
+    planner = SEOPlanningAgent([
+        FakeFixer("canonical_fixer", "fully_auto", ["missing_canonical"]),
+        FakeFixer("meta_fixer", "fully_auto", ["missing_title"]),
+    ])
+    context = PlanningContext(
+        objective=BusinessObjective(protected_url_patterns=["/legal/"]),
+        category_feedback={
+            "missing_title": FeedbackSummary(improved=1, degraded=2),
+        },
+    )
+    plan = await planner.create_plan(
+        [
+            issue(1, "missing_canonical", 0.95, url="https://example.com/legal/terms/"),
+            issue(2, "missing_title", 0.95, url="https://example.com/products/a/"),
+        ],
+        scan_id=13,
+        target_name="example",
+        context=context,
+    )
+
+    protected = next(action for action in plan.actions if action.issue_ids == [1])
+    degraded = next(action for action in plan.actions if action.issue_ids == [2])
+    assert protected.approval_required
+    assert "protected page requires approval" in protected.decision_factors
+    assert degraded.approval_required
+    assert "historical degradation rate requires approval" in degraded.decision_factors
+    assert plan.executable_issue_ids() == []
+
+
+@pytest.mark.asyncio
 async def test_ai_can_only_annotate_known_actions():
     planner = SEOPlanningAgent(
         [FakeFixer("canonical_fixer", "fully_auto", ["missing_canonical"])],
@@ -169,7 +238,7 @@ async def test_plan_json_round_trip(tmp_path):
     path = plan.write_json(tmp_path / "plan.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
 
-    assert payload["schema_version"] == "1.0"
+    assert payload["schema_version"] == "1.1"
     assert payload["scan_id"] == 10
     assert payload["actions"][0]["evidence"][0]["issue_id"] == 1
 
@@ -179,3 +248,11 @@ def test_plan_cli_is_registered():
     assert result.exit_code == 0
     assert "read-only optimization plan" in result.output
     assert "--ai" in result.output
+    assert "--goal" in result.output
+
+
+def test_plan_cli_rejects_unknown_goal_before_loading_storage():
+    result = CliRunner().invoke(app, ["plan", "generate", "--goal", "traffic_at_all_costs"])
+
+    assert result.exit_code == 0
+    assert "--goal must be" in result.output

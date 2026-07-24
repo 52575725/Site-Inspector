@@ -66,13 +66,18 @@ class Engine:
                 fixer = FixOrchestrator(
                     self.settings, session, ollama=self.ollama,
                 )
+                from src.agents.planning_context import PlanningContextCollector
                 from src.agents.seo_planning_agent import SEOPlanningAgent
 
                 planner = SEOPlanningAgent(fixer.fixers)
+                context = await PlanningContextCollector(
+                    self.settings, session,
+                ).collect(issues)
                 plan = await planner.create_plan(
                     issues,
                     scan_id=scan.id,
                     target_name=self.settings.target_name,
+                    context=context,
                 )
                 plan_path = (
                     self.settings.data_dir / "reports" / "plans"
