@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Sequence
+from collections.abc import Sequence
+from datetime import date, timedelta
 
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +11,19 @@ from config.settings import Settings
 from src.storage.models import Issue
 
 logger = logging.getLogger(__name__)
+
+# Ranking opportunity multipliers — higher = fix this page first
+# Pages near page 1 get the biggest boost because a small fix can
+# push them onto page 1, where CTR is ~10x higher than page 2.
+RANKING_OPPORTUNITY: dict[str, float] = {
+    "top3":      0.7,   # already winning — don't risk breaking it
+    "page1":     1.3,   # position 4-10: close to top 3, good upside
+    "page2":     1.5,   # position 11-20: highest upside, small push = page 1
+    "page3":     1.15,  # position 21-30: moderate upside
+    "deep":      0.8,   # position 31+: needs fundamental work
+    "unindexed": 0.5,   # not in GSC at all — fix won't help rankings yet
+    "no_data":   1.0,   # GSC unavailable — neutral, don't change score
+}
 
 
 class Analyzer:
@@ -253,6 +267,18 @@ class Analyzer:
     def __init__(self, settings: Settings, session: AsyncSession):
         self.settings = settings
         self.session = session
+        # Lazy-init GSC to avoid crash when credentials aren't configured
+        self._gsc = None
+
+    def _init_gsc(self):
+        """Lazy GSC init — only when credentials are configured."""
+        if self._gsc is not None:
+            return
+        from src.integrations.google_search_console import GoogleSearchConsole
+        self._gsc = GoogleSearchConsole(
+            credentials_path=self.settings.google_credentials_path,
+            site_url=self.settings.gsc_property,
+        )
 
     async def analyze_scan(self, scan_id: int, total_pages: int) -> Sequence[Issue]:
         """Score and prioritize all open issues from a scan."""
@@ -271,7 +297,11 @@ class Analyzer:
         for issue in issues:
             category_counts[issue.category] = category_counts.get(issue.category, 0) + 1
 
+        # ── Fetch GSC ranking data for ranking-aware prioritization ──
+        gsc_positions: dict[str, float] = await self._fetch_ranking_positions(issues)
+
         # Score each issue
+        gsc_hits = 0
         for issue in issues:
             impact = self._calculate_impact(issue, category_counts[issue.category], total_pages)
             severity = self._calculate_severity(issue)
@@ -281,17 +311,24 @@ class Analyzer:
             issue.severity = severity
             issue.fix_roi = fix_roi
 
-            issue.priority_score = (
+            base_score = (
                 impact * self.settings.priority_impact_weight
                 + severity * self.settings.priority_severity_weight
                 + fix_roi * self.settings.priority_fix_roi_weight
             )
 
+            # Apply ranking opportunity multiplier
+            position = gsc_positions.get(issue.url)
+            opportunity = self._ranking_opportunity(position)
+            if position is not None:
+                gsc_hits += 1
+            issue.priority_score = min(1.0, round(base_score * opportunity, 3))
             issue.priority_tier = self._classify_tier(round(issue.priority_score, 3))
 
         await self.session.flush()
         logger.info(
-            f"Analyzed {len(issues)} issues: "
+            f"Analyzed {len(issues)} issues "
+            f"(GSC data available for {gsc_hits}): "
             f"P0={sum(1 for i in issues if i.priority_tier == 'P0')}, "
             f"P1={sum(1 for i in issues if i.priority_tier == 'P1')}, "
             f"P2={sum(1 for i in issues if i.priority_tier == 'P2')}, "
@@ -484,6 +521,58 @@ class Analyzer:
         if category.startswith("wcag_"):
             return self.ROI_FACTORS["semi_auto"]
         return self.ROI_FACTORS["manual_required"]
+
+    async def _fetch_ranking_positions(
+        self, issues: Sequence[Issue],
+    ) -> dict[str, float]:
+        """Fetch GSC average position for each unique issue URL.
+
+        Returns {url: position} or empty dict if GSC is unavailable.
+        """
+        self._init_gsc()
+        if self._gsc is None or not self._gsc.available:
+            return {}
+
+        # Deduplicate URLs
+        unique_urls = list({issue.url for issue in issues if issue.url})
+        if not unique_urls:
+            return {}
+
+        today = date.today()
+        start = (today - timedelta(days=28)).isoformat()
+        end = today.isoformat()
+
+        try:
+            positions = await self._gsc.get_average_position(start, end, unique_urls)
+            if positions:
+                logger.info(
+                    f"GSC: got positions for {len(positions)}/{len(unique_urls)} URLs"
+                )
+            return positions
+        except Exception as e:
+            logger.debug(f"GSC position fetch skipped: {e}")
+            return {}
+
+    @staticmethod
+    def _ranking_opportunity(position: float | None) -> float:
+        """Convert a GSC ranking position to a priority multiplier.
+
+        Pages close to page 1 get the highest boost because a small SEO
+        fix can push them onto page 1, where CTR is dramatically higher.
+        """
+        if position is None:
+            return RANKING_OPPORTUNITY["no_data"]
+        if position <= 0:
+            return RANKING_OPPORTUNITY["unindexed"]
+        if position <= 3:
+            return RANKING_OPPORTUNITY["top3"]
+        if position <= 10:
+            return RANKING_OPPORTUNITY["page1"]
+        if position <= 20:
+            return RANKING_OPPORTUNITY["page2"]
+        if position <= 30:
+            return RANKING_OPPORTUNITY["page3"]
+        return RANKING_OPPORTUNITY["deep"]
 
     @staticmethod
     def _classify_tier(score: float) -> str:
