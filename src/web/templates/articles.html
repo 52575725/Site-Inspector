@@ -87,10 +87,10 @@
 
     <!-- 翻译缺失文章 -->
     <div class="card" id="translate-card">
-        <h2>🌐 翻译缺失的日文文章</h2>
-        <p style="color:var(--text-muted);margin-bottom:8px;">自动检测英文博客中有但日文博客中缺失的文章，AI 翻译后保存</p>
+        <h2>🌐 缺失翻译检测</h2>
+        <p style="color:var(--text-muted);margin-bottom:8px;">自动检测各语言版本中缺失的文章，AI 翻译后保存。支持任意语言对</p>
         <div style="display:flex;gap:8px;align-items:center;">
-            <button id="check-missing-btn" class="btn btn-secondary" onclick="checkMissing()">检测缺失文章</button>
+            <button id="check-missing-btn" class="btn btn-secondary" onclick="checkMissing()">检测缺失翻译</button>
             <button id="translate-all-btn" class="btn btn-primary" onclick="translateAll()" style="display:none;">一键翻译全部</button>
             <span id="translate-status"></span>
         </div>
@@ -322,6 +322,11 @@ async function loadArticle(id) {
     }
 }
 
+function flag(lang) {
+    const flags = {en:'🇬🇧',ja:'🇯🇵',zh:'🇨🇳',ko:'🇰🇷',fr:'🇫🇷',de:'🇩🇪',es:'🇪🇸',pt:'🇵🇹',ru:'🇷🇺',ar:'🇸🇦',vi:'🇻🇳',th:'🇹🇭'};
+    return flags[lang] || '🌐';
+}
+
 function escapeHtml(str) {
     const div = document.createElement('div');
     div.textContent = str;
@@ -346,9 +351,9 @@ async function checkMissing() {
             list.innerHTML = '<p style=\"color:var(--good);\">✅ 所有文章都已翻译！</p>';
             return;
         }
-        list.innerHTML = '<p>发现 <strong>' + missingArticles.length + '</strong> 篇缺失的日文文章：</p>' +
+        list.innerHTML = '<p>发现 <strong>' + missingArticles.length + '</strong> 篇缺失翻译：</p>' +
             missingArticles.map(a => '<div style=\"padding:4px 0;border-bottom:1px solid var(--border);\">' +
-                '🇬🇧 ' + a.en_path + '<br>→ 🇯🇵 ' + a.jp_path + '</div>').join('');
+                flag(a.source_lang) + ' ' + a.source_path + '<br>&rarr; ' + flag(a.target_lang) + ' ' + a.target_path + '</div>').join('');
         document.getElementById('translate-all-btn').style.display = 'inline-block';
     } catch (err) {
         status.innerHTML = '<span style=\"color:var(--bad);\">' + escapeHtml(err.message) + '</span>';
@@ -357,7 +362,7 @@ async function checkMissing() {
 
 async function translateAll() {
     if (!missingArticles || !missingArticles.length) {
-        document.getElementById('translate-status').textContent = '请先点击"检测缺失文章"';
+        document.getElementById('translate-status').textContent = '请先点击"检测缺失翻译"';
         return;
     }
     const btn = document.getElementById('translate-all-btn');
@@ -366,14 +371,14 @@ async function translateAll() {
     let done = 0;
     for (const article of missingArticles) {
         btn.textContent = '翻译中 (' + (done + 1) + '/' + missingArticles.length + ')...';
-        status.innerHTML = '<span class=\"spinner\"></span> 正在翻译: ' + article.en_path;
+        status.innerHTML = '<span class=\"spinner\"></span> 正在翻译: ' + article.source_path;
         try {
             const resp = await fetch('/api/articles/translate', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                    source_path: article.en_path,
-                    target_path: article.jp_path,
-                    source_lang: 'en', target_lang: 'ja',
+                    source_path: article.source_path,
+                    target_path: article.target_path,
+                    source_lang: article.source_lang, target_lang: article.target_lang,
                 }),
             });
             if (resp.ok) {
@@ -382,7 +387,7 @@ async function translateAll() {
                 status.innerHTML = '<span style=\"color:var(--good);\">✅ ' + done + '/' + missingArticles.length + ' 完成: ' + data.title + '</span>';
             } else {
                 const err = await resp.json().catch(() => ({}));
-                status.innerHTML = '<span style=\"color:var(--bad);\">❌ ' + article.en_path + ': ' + (err.detail || 'failed') + '</span>';
+                status.innerHTML = '<span style=\"color:var(--bad);\">❌ ' + article.source_path + ': ' + (err.detail || 'failed') + '</span>';
             }
         } catch (err) {
             status.innerHTML = '<span style=\"color:var(--bad);\">' + escapeHtml(err.message) + '</span>';
