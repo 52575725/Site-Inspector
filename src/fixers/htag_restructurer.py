@@ -51,7 +51,17 @@ class HTagRestructurer(BaseFixer):
         )
 
     def _add_h1(self, soup: BeautifulSoup, issue: dict) -> str:
-        """Add an H1 if missing, using the page title or first meaningful heading."""
+        """Add an H1 if missing, using the page title or first meaningful heading.
+
+        IMPORTANT: Checks for existing H1 before inserting — a false-positive
+        missing_h1 detection must not create a duplicate H1.
+        """
+        # Guard: if the page already has an H1, the inspector's missing_h1
+        # finding is a false positive — do NOT add another one.
+        existing_h1s = soup.find_all("h1")
+        if existing_h1s:
+            return str(soup)
+
         title_tag = soup.find("title")
         title = title_tag.string.strip() if title_tag and title_tag.string else ""
 

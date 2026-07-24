@@ -95,7 +95,7 @@ def validate_html(file_path: str, before: str, after: str) -> ValidationResult:
     result.stats["h1_before"] = before_h1s
     result.stats["h1_after"] = after_h1s
 
-    if after_h1s > MAX_H1_COUNT and after_h1s > before_h1s * 2:
+    if after_h1s > MAX_H1_COUNT and after_h1s >= before_h1s * 2:
         result.errors.append(
             f"H1 count exploded: {before_h1s} → {after_h1s} "
             f"(likely duplicate insertion bug)"

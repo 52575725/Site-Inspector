@@ -84,7 +84,9 @@ class FixOrchestrator:
         self.fixers: list[BaseFixer] = [
             MetaFixer(default_og_image=og_image,
                        default_og_width=str(og_w),
-                       default_og_height=str(og_h)),
+                       default_og_height=str(og_h),
+                       deepseek_api_key=settings.deepseek_api_key,
+                       deepseek_model=settings.deepseek_model),
             JsonLdGenerator(org_name=org_name, org_alt_name=org_alt,
                             org_address=org_address, domain=domain,
                             geo_lat=geo_config.get("latitude"),
@@ -178,8 +180,28 @@ class FixOrchestrator:
         changed_files: set[str] = set()
         page_cache: dict[str, str] = {}
         skip_reasons: dict[str, int] = {}
-        fixes_per_file: dict[str, int] = {}
-        MAX_FIXES_PER_FILE = 5  # Prevent chain-damage from too many fixes on one file
+
+        # ── Pre-fix snapshot: save original content BEFORE any fixer runs ──
+        original_snapshots: dict[str, str] = {}
+        for issue in fixable:
+            file_path = await self._url_to_file_path(issue.url, source)
+            if not file_path or file_path in original_snapshots:
+                continue
+            try:
+                page_cache[file_path] = await source.read_file(file_path)
+                original_snapshots[file_path] = page_cache[file_path]
+            except FileNotFoundError:
+                logger.debug(f"Snapshot: file not found '{file_path}', will skip fixes on it")
+        logger.debug(
+            f"Prefetched {len(original_snapshots)} file snapshots "
+            f"for {len(fixable)} fixable issues"
+        )
+
+        # ── Group issues by file path so all fixes for a page ──
+        #     are chained through a single BeautifulSoup instance.
+        #     This prevents HTML degradation from repeated parse→serialize cycles.
+        MAX_FIXES_PER_FILE = 3  # Tightened: fewer chained fixers reduce corruption risk
+        page_groups: dict[str, list[tuple]] = {}  # file_path → [(issue, fixer), ...]
 
         for issue in fixable:
             fixer = self._find_fixer(issue.category)
@@ -189,99 +211,114 @@ class FixOrchestrator:
                 logger.info(f"Skipping issue #{issue.id} ({issue.url}): {reason}")
                 continue
 
-            # Map URL to file path
             file_path = await self._url_to_file_path(issue.url, source)
             if not file_path:
-                continue
-
-            # Limit fixes per file to prevent chain-damage
-            if fixes_per_file.get(file_path, 0) >= MAX_FIXES_PER_FILE:
-                reason = f"max fixes ({MAX_FIXES_PER_FILE}) reached for '{file_path}'"
+                reason = f"no file_path for URL '{issue.url}'"
                 skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
                 continue
-            fixes_per_file[file_path] = fixes_per_file.get(file_path, 0) + 1
 
-            # Use cached content if available, otherwise read from source
-            if file_path not in page_cache:
+            if file_path not in original_snapshots:
+                reason = f"file not found in repo: '{file_path}'"
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                logger.info(f"Skipping issue #{issue.id} ({issue.url}): {reason}")
+                continue
+
+            if file_path not in page_groups:
+                page_groups[file_path] = []
+            page_groups[file_path].append((issue, fixer))
+
+        # Process each page — chain fixers on a single content string
+        for file_path, items in page_groups.items():
+            # Enforce per-file cap
+            if len(items) > MAX_FIXES_PER_FILE:
+                reason = (
+                    f"max fixes ({MAX_FIXES_PER_FILE}) reached for '{file_path}' "
+                    f"({len(items)} issues, capping)"
+                )
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                items = items[:MAX_FIXES_PER_FILE]
+
+            # Start from the original snapshot — every fixer on this page
+            # chains from the previous fixer's after_content
+            page_content = original_snapshots[file_path]
+
+            for issue, fixer in items:
+                issue_dict = {
+                    "id": issue.id,
+                    "category": issue.category,
+                    "url": issue.url,
+                    "element": issue.element,
+                    "description": issue.description,
+                    "file_path": file_path,
+                    "before_content": page_content,
+                }
+
                 try:
-                    page_cache[file_path] = await source.read_file(file_path)
-                except FileNotFoundError:
-                    reason = f"file not found in repo: '{file_path}'"
+                    result = await fixer.generate_fix(issue_dict, source, page_content)
+                except Exception as e:
+                    reason = f"fixer '{fixer.fixer_name}' crashed on {issue.url}: {e}"
                     skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-                    logger.info(f"Skipping issue #{issue.id} ({issue.url}): {reason}")
+                    logger.error(reason)
                     continue
 
-            page_content = page_cache[file_path]
+                if not result.success:
+                    reason = (
+                        f"fixer '{fixer.fixer_name}' returned success=False "
+                        f"for category '{issue.category}' on {issue.url}"
+                    )
+                    skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                    logger.warning(reason)
+                    continue
 
-            # Generate fix
-            issue_dict = {
-                "id": issue.id,
-                "category": issue.category,
-                "url": issue.url,
-                "element": issue.element,
-                "description": issue.description,
-                "file_path": file_path,
-                "before_content": page_content,
-            }
+                # Chain: next fixer sees this fixer's output
+                page_content = result.after_content
 
-            try:
-                result = await fixer.generate_fix(issue_dict, source, page_content)
-            except Exception as e:
-                reason = f"fixer '{fixer.fixer_name}' crashed on {issue.url}: {e}"
-                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-                logger.error(reason)
-                continue
+                # Record fix
+                explanation = describe_issue(issue.category, issue.description or "")
+                fix_status = "proposed" if dry_run else "applied"
+                fix = await self.fix_repo.create(
+                    issue_id=issue.id,
+                    scan_id=issue.scan_id,
+                    fixer=fixer.fixer_name,
+                    fix_type=fixer.fix_type,
+                    status=fix_status,
+                    plain_summary=explanation["summary"],
+                    impact_explanation=explanation["impact"],
+                    change_explanation=explanation["action"],
+                    risk_level=explanation["risk"],
+                    file_path=file_path,
+                    before_content=result.before_content,
+                    after_content=result.after_content,
+                    diff=result.diff,
+                    applied_at=None if dry_run else datetime.utcnow(),
+                )
 
-            if not result.success:
-                reason = f"fixer '{fixer.fixer_name}' returned success=False for category '{issue.category}' on {issue.url}"
-                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-                logger.warning(reason)
-                continue
+                await self.issue_repo.update_status(issue.id, fix_status)
+                issue.fix_applied_at = None if dry_run else datetime.utcnow()
+                applied_fixes.append(fix)
+                logger.info(
+                    f"Applied {fixer.fix_type} fix: {fixer.fixer_name} -> {issue.url}"
+                )
 
-            # Apply to file and update cache for subsequent fixers
-            if not dry_run:
-                await source.write_file(file_path, result.after_content)
+            # Write to disk ONCE after all fixers for this page are done
+            page_cache[file_path] = page_content
+            if not dry_run and page_content != original_snapshots.get(file_path, ""):
+                await source.write_file(file_path, page_content)
                 changed_files.add(file_path)
-            page_cache[file_path] = result.after_content
-
-            # Record fix
-            explanation = describe_issue(issue.category, issue.description or "")
-            fix_status = "proposed" if dry_run else "applied"
-            fix = await self.fix_repo.create(
-                issue_id=issue.id,
-                scan_id=issue.scan_id,
-                fixer=fixer.fixer_name,
-                fix_type=fixer.fix_type,
-                status=fix_status,
-                plain_summary=explanation["summary"],
-                impact_explanation=explanation["impact"],
-                change_explanation=explanation["action"],
-                risk_level=explanation["risk"],
-                file_path=file_path,
-                before_content=result.before_content,
-                after_content=result.after_content,
-                diff=result.diff,
-                applied_at=None if dry_run else datetime.utcnow(),
-            )
-
-            # Update issue status
-            await self.issue_repo.update_status(issue.id, fix_status)
-            issue.fix_applied_at = None if dry_run else datetime.utcnow()
-
-            applied_fixes.append(fix)
-            logger.info(f"Applied {fixer.fix_type} fix: {fixer.fixer_name} -> {issue.url}")
 
         # Commit and create PR (only when we own the source)
         if is_git and changed_files and not dry_run:
             # ── Post-fix validation: rollback corrupted files ──────
-            original_snapshots = {}
+            # Use pre-fix snapshots (saved BEFORE any fixer modified the files)
             validated_files = set()
             failed_files = set()
+            # Re-read current on-disk state for newly created files
             for fp in changed_files:
-                try:
-                    original_snapshots[fp] = await source.read_file(fp)
-                except Exception:
-                    pass  # newly created file, no original
+                if fp not in original_snapshots:
+                    try:
+                        original_snapshots[fp] = await source.read_file(fp)
+                    except Exception:
+                        pass
             for fp in changed_files:
                 if fp in page_cache and fp in original_snapshots:
                     result = validate_html(fp, original_snapshots[fp], page_cache[fp])

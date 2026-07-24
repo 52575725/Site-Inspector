@@ -61,17 +61,12 @@ class JsonLdGenerator(BaseFixer):
         # For schema_missing_type, only generate the specific missing type
         if category == "schema_missing_type":
             suggested = issue.get("suggested_value", "")
-            if suggested and suggested in required:
+            if suggested and suggested in required and suggested not in existing_types:
                 missing_types = [suggested]
 
-        # Fallback: if nothing missing but category indicates schema issues,
-        # generate at least Organization + WebSite as baseline
-        if not missing_types and category in (
-            "missing_structured_data", "schema_missing_type", "schema_missing_field",
-        ):
-            baseline = ["Organization", "WebSite"]
-            missing_types = [t for t in baseline if t not in existing_types]
-
+        # IMPORTANT: no fallback that re-introduces already-present types.
+        # If existing_types already covers all required schemas, skip.
+        # The previous fallback was the root cause of duplicate JSON-LD blocks.
         if not missing_types:
             return FixResult(
                 success=False, issue_id=issue.get("id", 0),

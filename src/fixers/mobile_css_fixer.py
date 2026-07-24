@@ -72,20 +72,22 @@ img, table, pre, iframe, video, canvas, svg {
 
         css_rule = self.CSS_TEMPLATES[category]
 
-        # Check if this specific fix is already present
-        marker = "/* [Site Inspector]"
-        if marker in page_content and category in page_content:
-            # Check if the exact rule for this category is already there
-            # Simple heuristic: look for the category-specific comment
-            cat_marker = f"/* [Site Inspector] {self._get_rule_description(category)}"
-            if cat_marker.lower() in page_content.lower():
-                return FixResult(
-                    success=False, issue_id=issue_id,
-                    fixer_name=self.fixer_name, fix_type=self.fix_type,
-                    file_path=file_path,
-                    before_content=page_content, after_content=page_content,
-                    error_message=f"CSS fix for '{category}' already applied",
-                )
+        # Idempotency check: extract <style> tag contents and search for
+        # the Site Inspector marker for this specific category. Using regex
+        # on the raw HTML rather than BeautifulSoup avoids reformatting issues
+        # and gives us the exact style content to search.
+        style_contents = " ".join(
+            re.findall(r"<style[^>]*>(.*?)</style>", page_content, re.DOTALL | re.IGNORECASE)
+        )
+        cat_marker = self._get_rule_description(category)
+        if cat_marker.lower() in style_contents.lower():
+            return FixResult(
+                success=False, issue_id=issue_id,
+                fixer_name=self.fixer_name, fix_type=self.fix_type,
+                file_path=file_path,
+                before_content=page_content, after_content=page_content,
+                error_message=f"CSS fix for '{category}' already applied (found in <style> tag)",
+            )
 
         # Inject CSS using string manipulation (more reliable than BS4 parsing)
         after_content = self._inject_css(page_content, css_rule)
