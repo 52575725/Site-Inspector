@@ -41,11 +41,11 @@ class Engine:
         if self._ollama:
             await self._ollama.close()
 
-    async def run_daily_scan(self, *, dry_run: bool = False) -> dict:
+    async def run_daily_scan(self, *, dry_run: bool = True) -> dict:
         """Execute a full daily scan: detect → analyze → fix → report.
 
         When dry_run=True, fixes are only suggested (not written to disk).
-        Default is dry_run=False (apply fixes immediately).
+        Dry-run is the default; callers must explicitly opt into writes.
         """
         logger.info("=== Starting daily scan ===")
 

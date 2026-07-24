@@ -49,6 +49,8 @@ logger = logging.getLogger(__name__)
 class FixOrchestrator:
     """Orchestrates the auto-fix pipeline: generate → validate → git → PR."""
 
+    MAX_FIXES_PER_FILE = 3
+
     def __init__(self, settings: Settings, session: AsyncSession,
                  ollama: Optional[OllamaClient] = None):
         self.settings = settings
@@ -203,7 +205,6 @@ class FixOrchestrator:
         # ── Group issues by file path so all fixes for a page ──
         #     are chained through a single BeautifulSoup instance.
         #     This prevents HTML degradation from repeated parse→serialize cycles.
-        MAX_FIXES_PER_FILE = 50  # effectively unlimited per page
         page_groups: dict[str, list[tuple]] = {}  # file_path → [(issue, fixer), ...]
 
         for issue in fixable:
@@ -240,13 +241,13 @@ class FixOrchestrator:
         # Process each page — chain fixers on a single content string
         for file_path, items in page_groups.items():
             # Enforce per-file cap
-            if len(items) > MAX_FIXES_PER_FILE:
+            if len(items) > self.MAX_FIXES_PER_FILE:
                 reason = (
-                    f"max fixes ({MAX_FIXES_PER_FILE}) reached for '{file_path}' "
+                    f"max fixes ({self.MAX_FIXES_PER_FILE}) reached for '{file_path}' "
                     f"({len(items)} issues, capping)"
                 )
                 skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-                items = items[:MAX_FIXES_PER_FILE]
+                items = items[:self.MAX_FIXES_PER_FILE]
 
             # Start from the original snapshot — every fixer on this page
             # chains from the previous fixer's after_content
