@@ -205,21 +205,113 @@ class Verifier:
         return await self._get_baseline(metric, url)
 
     async def _rollback_fix(self, fix: Fix) -> bool:
-        """Request manual rollback when no restorable deployment artifact exists."""
-        logger.warning(f"Rollback required for fix #{fix.id} on {fix.issue.url}")
+        """Restore the file to its pre-fix state and push a rollback commit.
 
-        # Update issue status
-        await self.session.execute(
-            update(Issue).where(Issue.id == fix.issue_id).values(status="rollback_required")
-        )
+        Uses fix.before_content to restore, then creates a git branch,
+        commits, pushes, and opens a rollback PR.
+        Returns True if a rollback PR was successfully created.
+        """
+        if not fix.file_path or not fix.before_content:
+            logger.warning(
+                f"Cannot rollback fix #{fix.id}: no file_path or before_content"
+            )
+            await self.audit_repo.log(
+                "rollback_failed", "fix", fix.id,
+                {"reason": "Missing file_path or before_content"},
+            )
+            return False
 
-        # Log rollback
-        await self.audit_repo.log(
-            "rollback_required", "fix", fix.id,
-            {
-                "issue_id": fix.issue_id,
-                "url": fix.issue.url,
-                "reason": "No commit hash or deployment adapter is attached to this fix",
-            },
+        from src.git.workflow import GitWorkflow
+        from src.sources.local_source import LocalSource
+        from pathlib import Path
+
+        # Load target config for repo path
+        target_config = self.settings.__class__.load_target(self.settings.target_name)
+        local_path = target_config.get("source", {}).get(
+            "local_path",
+            f"data/site_sources/{self.settings.target_name}",
         )
-        return False
+        repo_dir = Path(local_path)
+
+        if not (repo_dir / ".git").exists():
+            logger.warning(f"Not a git repo: {repo_dir}")
+            await self.audit_repo.log(
+                "rollback_failed", "fix", fix.id,
+                {"reason": f"Not a git repo: {repo_dir}"},
+            )
+            return False
+
+        try:
+            git = GitWorkflow(self.settings, repo_dir)
+            branch = f"rollback/fix-{fix.id}-{datetime.utcnow():%Y%m%d-%H%M}"
+
+            # Create rollback branch
+            await git._run_git("checkout", "-b", branch)
+
+            # Restore original content
+            source = LocalSource(repo_dir)
+            await source.connect()
+            await source.write_file(fix.file_path, fix.before_content)
+
+            # Stage, commit, push
+            commit_msg = (
+                f"rollback: revert fix #{fix.id} ({fix.fixer}) on {fix.file_path}\n\n"
+                f"Original fix was applied at {fix.applied_at}.\n"
+                f"Rollback triggered because verification showed metric degradation.\n"
+                f"Issue: {fix.issue.url} | Category: {fix.issue.category}"
+            )
+            commit_hash = await git.stage_and_commit([fix.file_path], commit_msg)
+
+            if not commit_hash:
+                raise RuntimeError("Commit produced no hash")
+
+            pushed = await git.push_branch(branch)
+            if not pushed:
+                raise RuntimeError("Push failed")
+
+            pr_title = f"[Rollback] Revert fix #{fix.id}: {fix.fixer} on {fix.issue.url}"
+            pr_body = (
+                f"## Automated Rollback\n\n"
+                f"**Fix #{fix.id}** ({fix.fixer}) was reverted because "
+                f"post-fix verification detected metric degradation.\n\n"
+                f"- **File:** `{fix.file_path}`\n"
+                f"- **Issue:** {fix.issue.category} on {fix.issue.url}\n"
+                f"- **Applied at:** {fix.applied_at}\n\n"
+                f"This restores the file to its pre-fix state."
+            )
+            pr_url = await git.create_pr(branch, pr_title, pr_body)
+
+            # Update issue and fix status
+            await self.session.execute(
+                update(Issue).where(Issue.id == fix.issue_id)
+                .values(status="rolled_back")
+            )
+            fix.status = "rolled_back"
+
+            await self.audit_repo.log(
+                "rollback_succeeded", "fix", fix.id,
+                {
+                    "issue_id": fix.issue_id,
+                    "url": fix.issue.url,
+                    "file_path": fix.file_path,
+                    "commit_hash": commit_hash,
+                    "pr_url": pr_url or "",
+                    "branch": branch,
+                },
+            )
+            logger.info(
+                f"Rollback PR created for fix #{fix.id}: {pr_url or 'no URL'}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Rollback failed for fix #{fix.id}: {e}")
+            await self.session.execute(
+                update(Issue).where(Issue.id == fix.issue_id)
+                .values(status="rollback_required")
+            )
+            await self.audit_repo.log(
+                "rollback_failed", "fix", fix.id,
+                {"reason": str(e)[:500]},
+            )
+            return False

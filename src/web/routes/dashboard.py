@@ -145,6 +145,27 @@ async def dashboard_scores(request: Request):
         return scores
 
 
+@router.get("/api/dashboard/plan")
+async def dashboard_plan(request: Request):
+    """Get the latest planning agent decision summary."""
+    from pathlib import Path
+    import json as json_mod
+
+    settings = request.app.state.settings
+    plans_dir = settings.data_dir / "reports" / "plans"
+    plan_data = None
+
+    if plans_dir.exists():
+        plan_files = sorted(plans_dir.glob("scan-*-plan.json"), reverse=True)
+        if plan_files:
+            try:
+                plan_data = json_mod.loads(plan_files[0].read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+    return {"plan": plan_data}
+
+
 @router.get("/api/dashboard/trend")
 async def dashboard_trend(request: Request):
     factory = get_db(request)

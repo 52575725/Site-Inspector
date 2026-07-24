@@ -17,6 +17,7 @@ INSPECTOR_LABELS = {
     "eeat": "E-E-A-T", "crawl_budget": "Crawl Budget", "url_audit": "URL Audit",
     "content_freshness": "Content Freshness", "image_seo": "Image SEO",
     "keyword_analyzer": "Keywords", "robots_txt": "Robots.txt", "platform_seo": "Platform SEO",
+    "competitor_gap": "Competitor Analysis",
 }
 
 

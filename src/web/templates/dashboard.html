@@ -1,107 +1,79 @@
 {% extends "base.html" %}
 {% block title %}Dashboard — Site Inspector{% endblock %}
-{% block page_title %}Dashboard{% endblock %}
 
 {% block content %}
-<!-- Quick Scan Form -->
-<div class="card quick-scan-card" id="quick-scan-card">
-    <h2>Quick Scan</h2>
-    <form id="quick-scan-form" onsubmit="return false;">
-        <div class="quick-scan-row">
-            <input type="url" id="quick-scan-url"
-                   class="quick-scan-input"
-                   placeholder="Website URL (e.g., https://example.com)"
-                   required autocomplete="url">
-            <button type="submit" id="quick-scan-btn" class="btn btn-primary">
-                Quick Scan
-            </button>
+<div class="dash-grid">
+    <!-- Quick Scan -->
+    <section class="card dash-card" id="quick-scan-card">
+        <div class="card-header"><h2>&#9889; Quick Scan</h2></div>
+        <form id="quick-scan-form" onsubmit="return false;">
+            <input type="url" id="quick-scan-url" class="input" placeholder="https://example.com" required>
+            <div class="form-row" style="margin-top:8px;gap:8px;">
+                <input type="text" id="quick-scan-repo" class="input" placeholder="GitHub repo (optional)" style="flex:2;">
+                <input type="text" id="quick-scan-branch" class="input" value="main" style="flex:1;max-width:100px;">
+                <label class="toggle"><input type="checkbox" id="quick-scan-push"> Push PR</label>
+                <button type="submit" id="quick-scan-btn" class="btn btn-primary" style="flex:0 0 auto;">Go</button>
+            </div>
+        </form>
+        <div id="quick-scan-progress" style="display:none;margin-top:8px;"></div>
+        <div id="quick-scan-result" style="display:none;margin-top:8px;"></div>
+    </section>
+
+    <!-- Stats -->
+    <section class="stat-row" id="stat-cards">
+        <div class="stat-card"><div class="stat-value" id="stat-scans">—</div><div class="stat-label">Scans</div></div>
+        <div class="stat-card"><div class="stat-value" id="stat-issues">—</div><div class="stat-label">Issues</div></div>
+        <div class="stat-card"><div class="stat-value" id="stat-fixes">—</div><div class="stat-label">Fixes</div></div>
+        <div class="stat-card p0"><div class="stat-value" id="stat-p0">—</div><div class="stat-label">P0 Critical</div></div>
+    </section>
+
+    <!-- Charts -->
+    <section class="card dash-card">
+        <div class="card-header"><h2>&#128200; Health & Trend</h2></div>
+        <div class="chart-row">
+            <div class="chart-cell"><canvas id="scores-chart"></canvas></div>
+            <div class="chart-cell"><canvas id="trend-chart"></canvas></div>
         </div>
-        <div class="quick-scan-row" style="margin-top:10px;">
-            <input type="text" id="quick-scan-repo"
-                   class="quick-scan-input"
-                   placeholder="GitHub repo URL (optional, for auto-fix & PR)"
-                   autocomplete="off">
-            <input type="text" id="quick-scan-branch"
-                   class="quick-scan-input"
-                   style="max-width:150px;"
-                   placeholder="Branch"
-                   value="main"
-                   autocomplete="off">
-            <label class="push-toggle" title="Push fixes as a PR to GitHub">
-                <input type="checkbox" id="quick-scan-push">
-                Push to GitHub
-            </label>
+    </section>
+
+    <!-- Plan Board -->
+    <section class="card dash-card" id="plan-card" style="display:none;">
+        <div class="card-header">
+            <h2>&#129504; Strategy Plan</h2>
+            <span id="plan-meta" class="badge"></span>
         </div>
-    </form>
-    <div id="quick-scan-progress" class="quick-scan-progress" style="display:none;"></div>
-    <div id="quick-scan-result" class="quick-scan-result" style="display:none;"></div>
-</div>
+        <div id="plan-summary" class="plan-stats"></div>
+        <div id="plan-exec-summary" class="plan-exec"></div>
+        <div id="plan-board" class="plan-board"></div>
+    </section>
 
-<div class="stat-grid" id="stat-cards">
-    <div class="stat-card">
-        <div class="stat-value" id="stat-scans">—</div>
-        <div class="stat-label">Total Scans</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-value" id="stat-issues">—</div>
-        <div class="stat-label">Total Issues</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-value" id="stat-fixes">—</div>
-        <div class="stat-label">Fix Suggestions</div>
-    </div>
-    <div class="stat-card stat-p0">
-        <div class="stat-value" id="stat-p0">—</div>
-        <div class="stat-label">P0 Issues</div>
-    </div>
-</div>
+    <!-- Competitor Board -->
+    <section class="card dash-card" id="competitor-card" style="display:none;">
+        <div class="card-header"><h2>&#128270; Competitors</h2></div>
+        <div id="competitor-board" class="comp-board"></div>
+    </section>
 
-<div class="chart-row">
-    <div class="chart-card">
-        <h2>Dimension Health Scores</h2>
-        <canvas id="scores-chart"></canvas>
-    </div>
-    <div class="chart-card">
-        <h2>Trend (Last 10 Scans)</h2>
-        <canvas id="trend-chart"></canvas>
-    </div>
-</div>
+    <!-- Latest Scan -->
+    <section class="card dash-card" id="latest-scan-card">
+        <div class="card-header"><h2>&#128260; Latest Scan</h2></div>
+        <div id="latest-scan-info" class="scan-info">Loading...</div>
+    </section>
 
-<div class="card" id="latest-scan-card">
-    <h2>Latest Scan</h2>
-    <div id="latest-scan-info">Loading...</div>
-</div>
-
-<!-- 邮件通知设置 -->
-<div class="card" id="email-settings-card">
-    <h2>📧 邮件通知设置</h2>
-    <p style="color:var(--text-muted);margin-bottom:12px;">扫描完成后发送邮件通知。用 QQ 邮箱的话，SMTP 密码填授权码（不是 QQ 密码）</p>
-    <form id="email-form" onsubmit="return false;">
-        <div class="form-grid" style="grid-template-columns:1fr 1fr;">
-            <div class="form-group">
-                <label>收件邮箱（逗号分隔）</label>
-                <input type="text" id="email-recipients" placeholder="you@qq.com, boss@qq.com">
+    <!-- Email -->
+    <section class="card dash-card" id="email-settings-card">
+        <div class="card-header"><h2>&#9993; Email Notifications</h2></div>
+        <form id="email-form" onsubmit="return false;" class="email-form">
+            <div class="form-row" style="gap:8px;">
+                <input type="text" id="email-recipients" class="input" placeholder="you@qq.com" style="flex:2;">
+                <input type="text" id="email-smtp-host" class="input" placeholder="smtp.qq.com" style="flex:1;">
+                <input type="number" id="email-smtp-port" class="input" value="587" style="max-width:80px;">
+                <input type="text" id="email-username" class="input" placeholder="Sender" style="flex:1;">
+                <input type="password" id="email-password" class="input" placeholder="Password / Auth Code" style="flex:1;">
+                <button type="submit" class="btn btn-secondary" style="flex:0 0 auto;">Save</button>
             </div>
-            <div class="form-group">
-                <label>SMTP 服务器</label>
-                <input type="text" id="email-smtp-host" placeholder="smtp.qq.com">
-            </div>
-            <div class="form-group">
-                <label>SMTP 端口</label>
-                <input type="number" id="email-smtp-port" value="587">
-            </div>
-            <div class="form-group">
-                <label>发件邮箱</label>
-                <input type="text" id="email-username" placeholder="you@qq.com">
-            </div>
-            <div class="form-group">
-                <label>SMTP 密码/授权码</label>
-                <input type="password" id="email-password" placeholder="留空则不改">
-            </div>
-        </div>
-        <button type="submit" class="btn btn-primary">保存设置</button>
-        <span id="email-status" style="margin-left:8px;"></span>
-    </form>
+        </form>
+        <span id="email-status"></span>
+    </section>
 </div>
 {% endblock %}
 
