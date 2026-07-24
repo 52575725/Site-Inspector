@@ -102,7 +102,7 @@ class ImageOptimizer(BaseFixer):
                     modified += 1
 
             if category == "image_not_webp":
-                if self._fix_webp_fallback(img, src, soup):
+                if self._fix_webp(img, src, soup, source):
                     modified += 1
 
         if modified == 0:
@@ -202,9 +202,12 @@ class ImageOptimizer(BaseFixer):
         return True
 
     @staticmethod
-    def _fix_webp_fallback(img, src: str, soup: BeautifulSoup) -> bool:
-        """Add <picture> element with WebP source and original fallback."""
-        # Only add if parent is not already <picture>
+    def _fix_webp(img, src: str, soup: BeautifulSoup, source: BaseSource | None) -> bool:
+        """Convert image to WebP AND add <picture> element.
+
+        When source provides filesystem access (local/git), performs actual
+        file conversion; otherwise only adds the HTML fallback.
+        """
         if img.parent and img.parent.name == "picture":
             return False
 
@@ -217,17 +220,19 @@ class ImageOptimizer(BaseFixer):
 
         webp_src = re.sub(r"\.(png|jpe?g|gif)$", ".webp", base, flags=re.IGNORECASE)
         if webp_src == base:
-            return False  # Can't convert — already WebP or unknown format
+            return False
 
         if query:
             webp_src += "?" + query
 
-        # Create <picture> wrapper
+        # ── Real file conversion ────────────────────────────────
+        file_converted = ImageOptimizer._convert_image_file(source, src)
+
+        # ── HTML <picture> element ──────────────────────────────
         picture = soup.new_tag("picture")
         source_tag = soup.new_tag("source", srcset=webp_src, type="image/webp")
         picture.append(source_tag)
 
-        # Move img into picture (BeautifulSoup handles this)
         img_copy = soup.new_tag(
             "img",
             src=img.get("src", ""),
@@ -237,11 +242,36 @@ class ImageOptimizer(BaseFixer):
             loading=img.get("loading", ""),
             decoding=img.get("decoding", ""),
         )
-        # Remove empty attributes
         for attr in list(img_copy.attrs.keys()):
             if not img_copy[attr]:
                 del img_copy[attr]
         picture.append(img_copy)
-
         img.replace_with(picture)
+
+        if file_converted:
+            logger.info(f"WebP: converted + picture tag for {src}")
         return True
+
+    @staticmethod
+    def _convert_image_file(source: BaseSource | None, src: str) -> bool:
+        """Actually convert the image file to WebP on disk, if source permits."""
+        if source is None:
+            return False
+        # Only local/git sources have filesystem access
+        work_dir = getattr(source, "root", None) or getattr(source, "_work_dir", None)
+        if not work_dir:
+            return False
+        from pathlib import Path
+        from src.integrations.image_webp import convert_to_webp
+
+        # Resolve image path relative to source root
+        clean_src = src.lstrip("/")
+        image_path = Path(work_dir) / clean_src
+        if not image_path.exists():
+            # Try without leading path segments
+            image_path = Path(work_dir) / image_path.name
+        if not image_path.exists():
+            return False
+
+        result = convert_to_webp(image_path, quality=80)
+        return result is not None
