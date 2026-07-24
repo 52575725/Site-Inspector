@@ -18,6 +18,8 @@ REQUIRED_SCHEMAS: dict[str, list[str]] = {
     "blog_article": ["Article", "Organization", "BreadcrumbList"],
     "about": ["Organization", "BreadcrumbList"],
     "contact": ["Organization", "BreadcrumbList", "ContactPoint"],
+    "faq": ["FAQPage", "Organization", "BreadcrumbList"],
+    "howto": ["HowTo", "Organization", "BreadcrumbList"],
 }
 
 # Required fields per Schema.org type (minimal set)
@@ -30,9 +32,26 @@ REQUIRED_FIELDS: dict[str, list[str]] = {
     "ItemList": ["itemListElement"],
     "ContactPoint": ["contactType"],
     "FAQPage": ["mainEntity"],
+    "HowTo": ["name", "step"],
     "LocalBusiness": ["name", "address"],
     "PostalAddress": ["streetAddress", "addressLocality", "addressCountry"],
 }
+
+# Patterns that suggest FAQ-style content
+_FAQ_PATTERNS = [
+    ("<h2>Frequently Asked", "<h2>FAQ"),
+    ("<h3>", "</h3>", "<p>"),  # H3 + paragraph = likely Q&A
+    ("question", "answer"),
+]
+# Min number of Q&A pairs to consider it an FAQ page
+_FAQ_MIN_PAIRS = 2
+
+# Patterns that suggest HowTo content
+_HOWTO_PATTERNS = [
+    ("step 1", "step 2"),
+    ("first", "second", "finally"),
+    ("how to", "you'll need", "step"),
+]
 
 
 class StructuredDataValidator(BaseInspector):
@@ -109,9 +128,11 @@ class StructuredDataValidator(BaseInspector):
                     suggested_value="1",
                 ))
 
-        # 2. Check required types for this page
-        page_type = self._classify_page(url)
-        expected_types = REQUIRED_SCHEMAS.get(page_type, [])
+        # 2. Check required types for this page (with content-aware detection)
+        page_type = self._classify_page(url, soup)
+        # Augment page_type with content detection
+        enhanced_type = self._detect_content_schema(soup, page_type)
+        expected_types = REQUIRED_SCHEMAS.get(enhanced_type, REQUIRED_SCHEMAS.get(page_type, []))
         present_types = set(type_counts.keys())
 
         for required_type in expected_types:
@@ -153,7 +174,7 @@ class StructuredDataValidator(BaseInspector):
         return findings
 
     @staticmethod
-    def _classify_page(url: str) -> str:
+    def _classify_page(url: str, soup: BeautifulSoup | None = None) -> str:
         path = urlparse(url).path.lower().rstrip("/")
         if path in ("", "/", "/jp"):
             return "homepage"
@@ -167,4 +188,38 @@ class StructuredDataValidator(BaseInspector):
             return "about"
         if "/contact/" in path:
             return "contact"
+        if "/faq" in path or "/questions" in path:
+            return "faq"
+        if "/guide" in path or "/how-to" in path or "/tutorial" in path:
+            return "howto"
         return "homepage"
+
+    @staticmethod
+    def _detect_content_schema(soup: BeautifulSoup, page_type: str) -> str:
+        """Detect FAQ / HowTo patterns from page content.
+
+        Upgrades page_type when content matches known patterns,
+        even if the URL doesn't explicitly contain /faq/ or /guide/.
+        """
+        # FAQ detection: count <details> + <h3> followed closely by <p>
+        details_count = len(soup.find_all("details"))
+        h3_count = 0
+        for h3 in soup.find_all("h3"):
+            next_elem = h3.find_next_sibling()
+            if next_elem and next_elem.name in ("p", "div", "ul", "ol"):
+                h3_count += 1
+        qa_pairs = details_count + h3_count
+
+        if qa_pairs >= _FAQ_MIN_PAIRS and page_type not in ("product",):
+            return "faq"
+
+        # HowTo detection: sequential numbered steps
+        h2_texts = [h.get_text(strip=True).lower() for h in soup.find_all("h2")]
+        step_count = sum(1 for t in h2_texts
+                        if t.startswith("step ") or t.startswith("step-")
+                        or any(t.startswith(f"{i}.") for i in range(1, 10))
+                        or any(t.startswith(f"{i})") for i in range(1, 10)))
+        if step_count >= 3:
+            return "howto"
+
+        return page_type

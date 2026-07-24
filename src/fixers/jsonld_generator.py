@@ -17,6 +17,8 @@ REQUIRED_SCHEMAS: dict[str, list[str]] = {
     "Article": ["Article", "Organization", "BreadcrumbList"],
     "BreadcrumbList": ["Organization", "BreadcrumbList", "ItemList"],
     "WebPage": ["Organization", "BreadcrumbList"],
+    "FAQ": ["FAQPage", "Organization", "BreadcrumbList"],
+    "HowTo": ["HowTo", "Organization", "BreadcrumbList"],
 }
 
 
@@ -54,7 +56,7 @@ class JsonLdGenerator(BaseFixer):
         existing_types = self._get_existing_types(soup)
 
         # Determine which schemas to generate
-        page_type = self._guess_page_type(url)
+        page_type = self._guess_page_type(url, soup)
         required = REQUIRED_SCHEMAS.get(page_type, ["Organization", "WebSite"])
         missing_types = [t for t in required if t not in existing_types]
 
@@ -127,6 +129,10 @@ class JsonLdGenerator(BaseFixer):
             return self._article_schema(url, title, description, soup)
         if page_type == "BreadcrumbList":
             return self._breadcrumb_schema(url)
+        if page_type == "FAQ":
+            return self._faq_schema(soup)
+        if page_type == "HowTo":
+            return self._howto_schema(url, title, description, soup)
         return self._website_schema(url, title, description)
 
     def _org_schema(self, url: str, title: str, description: str) -> dict:
@@ -149,17 +155,46 @@ class JsonLdGenerator(BaseFixer):
 
     def _product_schema(self, url: str, title: str, description: str,
                         soup: BeautifulSoup) -> dict:
-        return {
+        """Generate Product schema with Offers, extracting price/currency from page if present."""
+        # Try to extract price from page content
+        import re
+        body_text = soup.get_text(separator=" ", strip=True) if soup else ""
+        price_match = re.search(
+            r"(?:USD|US\$|\\$|HK\$|HKD)\s*([\d,]+\.?\d*)",
+            body_text, re.IGNORECASE,
+        )
+        currency = "USD"
+        price = None
+        if price_match:
+            price = price_match.group(1).replace(",", "")
+            if "HK$" in price_match.group(0) or "HKD" in price_match.group(0):
+                currency = "HKD"
+
+        schema: dict = {
             "@context": "https://schema.org",
             "@type": "Product",
             "name": title or "Silver Products",
-            "description": description,
+            "description": description or title,
             "url": url,
             "offers": {
                 "@type": "Offer",
                 "availability": "https://schema.org/InStock",
+                "priceCurrency": currency,
             },
         }
+        if price:
+            schema["offers"]["price"] = price
+        # Add image if page has a product image
+        main_img = soup.find("img", attrs={"class": re.compile(r"product|hero|main", re.I)})
+        if not main_img:
+            main_img = soup.find("img", src=True)
+        if main_img and main_img.get("src"):
+            src = main_img["src"]
+            if src.startswith("/"):
+                from urllib.parse import urljoin
+                src = urljoin(self.domain, src)
+            schema["image"] = src
+        return schema
 
     def _article_schema(self, url: str, title: str, description: str,
                         soup: BeautifulSoup) -> dict:
@@ -194,6 +229,121 @@ class JsonLdGenerator(BaseFixer):
             "itemListElement": items,
         }
 
+    def _faq_schema(self, soup: BeautifulSoup) -> dict | None:
+        """Generate FAQPage schema from <details> or H3+P Q&A pairs on the page."""
+        main_entities: list[dict] = []
+
+        # Strategy 1: <details> elements (common FAQ markup)
+        for details in soup.find_all("details"):
+            summary = details.find("summary")
+            question = summary.get_text(strip=True) if summary else ""
+            # Answer = everything in <details> except <summary>
+            if summary:
+                summary.decompose()
+            answer = details.get_text(separator=" ", strip=True)
+            if summary:
+                # Restore for idempotency
+                details.insert(0, summary)
+            if question and answer and len(question) > 5 and len(answer) > 20:
+                main_entities.append({
+                    "@type": "Question",
+                    "name": question[:200],
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": answer[:1000],
+                    },
+                })
+                if len(main_entities) >= 10:
+                    break
+
+        # Strategy 2: H3 followed by P/div as Q&A
+        if len(main_entities) < 2:
+            for h3 in soup.find_all("h3"):
+                question = h3.get_text(strip=True)
+                if not question or len(question) < 5:
+                    continue
+                next_sib = h3.find_next_sibling()
+                if next_sib and next_sib.name in ("p", "div", "ul", "ol"):
+                    answer = next_sib.get_text(separator=" ", strip=True)
+                    if answer and len(answer) > 20:
+                        main_entities.append({
+                            "@type": "Question",
+                            "name": question[:200],
+                            "acceptedAnswer": {
+                                "@type": "Answer",
+                                "text": answer[:1000],
+                            },
+                        })
+                if len(main_entities) >= 10:
+                    break
+
+        if not main_entities:
+            return None
+
+        return {
+            "@context": "https://schema.org",
+            "@type": "FAQPage",
+            "mainEntity": main_entities,
+        }
+
+    def _howto_schema(self, url: str, title: str, description: str,
+                      soup: BeautifulSoup) -> dict | None:
+        """Generate HowTo schema from step-by-step content on the page."""
+        steps: list[dict] = []
+        h2_list = soup.find_all("h2") if soup else []
+
+        for i, h2 in enumerate(h2_list, 1):
+            heading = h2.get_text(strip=True)
+            if not heading or len(heading) < 3:
+                continue
+
+            # Collect content until the next h2
+            content_parts: list[str] = []
+            elem = h2.find_next_sibling()
+            while elem and elem.name != "h2":
+                text = elem.get_text(separator=" ", strip=True)
+                if text and len(text) > 10:
+                    content_parts.append(text)
+                elem = elem.find_next_sibling()
+
+            instruction = " ".join(content_parts[:3]) if content_parts else heading
+
+            if len(instruction) > 20:
+                steps.append({
+                    "@type": "HowToStep",
+                    "position": len(steps) + 1,
+                    "name": heading[:120],
+                    "itemListElement": [{
+                        "@type": "HowToDirection",
+                        "text": instruction[:500],
+                    }],
+                })
+
+        if len(steps) < 2:
+            return None
+
+        # Estimate total time from content
+        import re
+        body_text = soup.get_text(separator=" ", strip=True) if soup else ""
+        time_match = re.search(
+            r"(\d+)\s*(?:minute|min)s?", body_text, re.IGNORECASE,
+        )
+        total_time = None
+        if time_match:
+            total_time = f"PT{time_match.group(1)}M"
+
+        schema: dict = {
+            "@context": "https://schema.org",
+            "@type": "HowTo",
+            "name": title or "Step-by-Step Guide",
+            "description": description or title,
+            "step": steps,
+        }
+        if total_time:
+            schema["totalTime"] = total_time
+
+        return schema
+
     def _website_schema(self, url: str, title: str, description: str) -> dict:
         return {
             "@context": "https://schema.org",
@@ -227,7 +377,7 @@ class JsonLdGenerator(BaseFixer):
         return types
 
     @staticmethod
-    def _guess_page_type(url: str) -> str:
+    def _guess_page_type(url: str, soup: BeautifulSoup | None = None) -> str:
         path = urlparse(url).path.lower().rstrip("/")
         if path in ("", "/"):
             return "Organization"
@@ -237,4 +387,22 @@ class JsonLdGenerator(BaseFixer):
             return "Product"
         if "/blog" == path:
             return "BreadcrumbList"
+        if "/faq" in path or "/questions" in path:
+            return "FAQ"
+        if "/guide" in path or "/how-to" in path or "/tutorial" in path:
+            return "HowTo"
+        # Content-based detection
+        if soup is not None:
+            details = len(soup.find_all("details"))
+            h3_with_content = 0
+            for h3 in soup.find_all("h3"):
+                next_sib = h3.find_next_sibling()
+                if next_sib and next_sib.name in ("p", "div", "ul", "ol"):
+                    h3_with_content += 1
+            if details + h3_with_content >= 2:
+                return "FAQ"
+            h2_texts = [h.get_text(strip=True).lower() for h in soup.find_all("h2")]
+            steps = sum(1 for t in h2_texts if t.startswith("step ") or t.startswith("step-"))
+            if steps >= 3:
+                return "HowTo"
         return "WebPage"
