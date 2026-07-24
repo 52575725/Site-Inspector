@@ -19,7 +19,7 @@ class ScheduledJobs:
         """Job: run daily full inspection scan."""
         logger.info(f"Scheduled daily scan starting at {datetime.utcnow()}")
         try:
-            result = await self.engine.run_daily_scan()
+            result = await self.engine.run_daily_scan(dry_run=True)
             logger.info(f"Daily scan completed: {result}")
             from src.notifications.notifier import Notifier
             notifier = Notifier(self.engine.settings)

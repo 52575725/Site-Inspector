@@ -41,8 +41,12 @@ class Engine:
         if self._ollama:
             await self._ollama.close()
 
-    async def run_daily_scan(self) -> dict:
-        """Execute a full daily scan: detect → analyze → fix → report."""
+    async def run_daily_scan(self, *, dry_run: bool = False) -> dict:
+        """Execute a full daily scan: detect → analyze → fix → report.
+
+        When dry_run=True, fixes are only suggested (not written to disk).
+        Default is dry_run=False (apply fixes immediately).
+        """
         logger.info("=== Starting daily scan ===")
 
         async with self.session_factory() as session:
@@ -61,7 +65,7 @@ class Engine:
                 fixer = FixOrchestrator(
                     self.settings, session, ollama=self.ollama,
                 )
-                fixes = await fixer.run_fixes(issues, dry_run=True)
+                fixes = await fixer.run_fixes(issues, dry_run=dry_run)
             else:
                 fixes = []
 

@@ -25,7 +25,7 @@ priority_weights:
 auto_fix:
   sandbox_diff_threshold_auto: 0.05
   sandbox_diff_threshold_review: 0.15
-  max_auto_fixes_per_scan: 50
+  max_auto_fixes_per_scan: 200
 
 web:
   max_active_scans: 1

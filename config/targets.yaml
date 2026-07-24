@@ -49,5 +49,5 @@ targets:
         jp: "/jp/contact/"
       - en: "/blog/"
         jp: "/jp/blog/"
-    competitors: []
+    competitors:
       - https://www.kitco.com/silver-price-today
