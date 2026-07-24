@@ -91,6 +91,7 @@ def fix_run(
 
             from src.core.analyzer import Analyzer
             from src.core.fix_orchestrator import FixOrchestrator
+            from src.agents.planning_context import PlanningContextCollector
             from src.agents.seo_planning_agent import SEOPlanningAgent
 
             analyzer = Analyzer(settings, session)
@@ -98,10 +99,12 @@ def fix_run(
 
             fixer = FixOrchestrator(settings, session, ollama=engine.ollama)
             planner = SEOPlanningAgent(fixer.fixers)
+            context = await PlanningContextCollector(settings, session).collect(issues)
             plan = await planner.create_plan(
                 issues,
                 scan_id=scan.id,
                 target_name=settings.target_name,
+                context=context,
             )
             plan_path = (
                 settings.data_dir / "reports" / "plans"
@@ -133,13 +136,29 @@ def plan_generate(
     scan_id: Optional[int] = typer.Option(None, help="Plan issues from a specific scan"),
     objective: str = typer.Option(
         "Improve qualified organic visibility without unreviewed business changes",
-        help="Business objective that constrains the plan",
+        help="Narrative objective recorded in the plan",
+    ),
+    goal: Optional[str] = typer.Option(
+        None,
+        help="Override scoring goal: organic_visibility, qualified_inquiries, or technical_health",
     ),
     output: Optional[Path] = typer.Option(None, help="Output JSON path"),
     use_ai: bool = typer.Option(False, "--ai", help="Add bounded DeepSeek planning notes"),
 ):
     """Generate a read-only optimization plan from scan evidence."""
     async def _run():
+        allowed_goals = {
+            "organic_visibility",
+            "qualified_inquiries",
+            "technical_health",
+        }
+        if goal and goal not in allowed_goals:
+            console.print(
+                "[red]--goal must be organic_visibility, "
+                "qualified_inquiries, or technical_health[/red]"
+            )
+            return
+
         await init_db()
         settings = Settings.load()
         factory = get_session_factory(settings)
@@ -159,6 +178,10 @@ def plan_generate(
         try:
             async with factory() as session:
                 from src.agents.seo_planning_agent import SEOPlanningAgent
+                from src.agents.planning_context import (
+                    BusinessObjective,
+                    PlanningContextCollector,
+                )
                 from src.core.analyzer import Analyzer
                 from src.core.fix_orchestrator import FixOrchestrator
                 from src.storage.repositories import ScanRepository, TargetRepository
@@ -178,11 +201,17 @@ def plan_generate(
                 issues = await analyzer.analyze_scan(scan.id, scan.pages_crawled)
                 fixer = FixOrchestrator(settings, session)
                 planner = SEOPlanningAgent(fixer.fixers, reasoner=reasoner)
+                context = await PlanningContextCollector(settings, session).collect(issues)
+                if goal:
+                    objective_data = context.objective.model_dump()
+                    objective_data["goal"] = goal
+                    context.objective = BusinessObjective.model_validate(objective_data)
                 plan = await planner.create_plan(
                     issues,
                     scan_id=scan.id,
                     target_name=settings.target_name,
                     objective=objective,
+                    context=context,
                     use_ai=use_ai,
                 )
                 destination = output or (
@@ -197,6 +226,7 @@ def plan_generate(
                 table.add_column("Phase")
                 table.add_column("Action")
                 table.add_column("Risk")
+                table.add_column("Score")
                 table.add_column("Mode")
                 table.add_column("Approval")
                 for action in plan.actions:
@@ -205,6 +235,7 @@ def plan_generate(
                         str(action.phase),
                         action.title,
                         action.risk,
+                        f"{action.decision_score:.2f}",
                         action.execution_mode,
                         "yes" if action.approval_required else "no",
                     )

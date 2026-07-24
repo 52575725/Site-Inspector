@@ -118,12 +118,29 @@ uv run site-inspector plan generate
 
 The plan is written to `data/reports/plans/` and includes evidence, ordering,
 risk, confidence, approval requirements, validation checks, rollback
-conditions, and deferred findings. Optional AI notes are bounded to existing
-actions and require `SI_DEEPSEEK_API_KEY`:
+conditions, and deferred findings. When configured, the planner also uses
+Search Console, Analytics, and completed verification outcomes to score search
+opportunity and prior fix reliability. Missing integrations do not block a
+plan; the report records which signals were unavailable.
+
+Target-specific business policy can prioritize or protect URL groups:
+
+```yaml
+planning:
+  goal: qualified_inquiries
+  priority_url_patterns: ["/products/", "/contact/"]
+  protected_url_patterns: ["/privacy/", "/terms/"]
+```
+
+Protected pages always require approval. Optional AI notes are bounded to
+existing actions and require `SI_DEEPSEEK_API_KEY`:
 
 ```bash
 uv run site-inspector plan generate --ai
 ```
+
+Override the configured scoring goal for one plan with `--goal`, using one of
+`organic_visibility`, `qualified_inquiries`, or `technical_health`.
 
 Generate fixes as a dry run before allowing writes:
 

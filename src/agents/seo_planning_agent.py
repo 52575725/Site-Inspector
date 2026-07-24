@@ -9,6 +9,7 @@ from typing import Any, Literal, Protocol, Sequence
 
 from pydantic import BaseModel, Field
 
+from src.agents.planning_context import PlanningContext
 from src.fixers.base import BaseFixer
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,8 @@ class PlanningPolicy(BaseModel):
     max_actions: int = Field(default=20, ge=1, le=100)
     max_issues_per_page: int = Field(default=3, ge=1, le=20)
     min_auto_confidence: float = Field(default=0.78, ge=0.0, le=1.0)
+    feedback_min_samples: int = Field(default=3, ge=1, le=100)
+    feedback_degradation_limit: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class PlanEvidence(BaseModel):
@@ -55,6 +58,14 @@ class PlannedAction(BaseModel):
     execution_mode: ExecutionMode
     risk: RiskLevel
     confidence: float
+    impact_score: float
+    business_value: float
+    opportunity_score: float
+    feedback_score: float
+    effort_score: float
+    decision_score: float
+    estimated_hours: float
+    decision_factors: list[str] = Field(default_factory=list)
     approval_required: bool
     dependencies: list[str] = Field(default_factory=list)
     expected_metrics: list[str] = Field(default_factory=list)
@@ -71,7 +82,7 @@ class DeferredIssue(BaseModel):
 
 
 class AuditPlan(BaseModel):
-    schema_version: str = "1.0"
+    schema_version: str = "1.1"
     scan_id: int
     target_name: str
     objective: str
@@ -82,6 +93,7 @@ class AuditPlan(BaseModel):
     deferred: list[DeferredIssue]
     stop_conditions: list[str]
     warnings: list[str]
+    min_auto_confidence: float = 0.78
     ai_assisted: bool = False
 
     def write_json(self, path: Path) -> Path:
@@ -100,7 +112,7 @@ class AuditPlan(BaseModel):
             if (
                 action.execution_mode == "fully_auto"
                 and action.risk == "low"
-                and action.confidence >= 0.78
+                and action.confidence >= self.min_auto_confidence
                 and not action.approval_required
             )
             for issue_id in action.issue_ids
@@ -175,6 +187,7 @@ class SEOPlanningAgent:
         scan_id: int,
         target_name: str,
         objective: str = "Improve qualified organic visibility without unreviewed business changes",
+        context: PlanningContext | None = None,
         use_ai: bool = False,
     ) -> AuditPlan:
         plan = self._build_plan(
@@ -182,6 +195,7 @@ class SEOPlanningAgent:
             scan_id=scan_id,
             target_name=target_name,
             objective=objective,
+            context=context or PlanningContext(),
         )
         if use_ai and self.reasoner:
             await self._add_ai_notes(plan)
@@ -196,9 +210,14 @@ class SEOPlanningAgent:
         scan_id: int,
         target_name: str,
         objective: str,
+        context: PlanningContext | None = None,
     ) -> AuditPlan:
+        context = context or PlanningContext()
         open_issues = [issue for issue in issues if getattr(issue, "status", "open") == "open"]
-        ordered = sorted(open_issues, key=self._issue_sort_key)
+        ordered = sorted(
+            open_issues,
+            key=lambda issue: self._issue_sort_key(issue, context),
+        )
 
         selected: list[Any] = []
         deferred: list[DeferredIssue] = []
@@ -223,7 +242,7 @@ class SEOPlanningAgent:
             groups.items(),
             key=lambda item: (
                 item[0][0],
-                -max(float(getattr(issue, "priority_score", 0.0) or 0.0) for issue in item[1]),
+                -max(self._decision_score(issue, context)[0] for issue in item[1]),
                 item[0][1],
             ),
         )
@@ -237,11 +256,30 @@ class SEOPlanningAgent:
             phase, category, mode, fixer, risk = group_key
             action_id = f"A{index:02d}"
             evidence = [self._evidence(issue) for issue in group_issues]
-            confidence = self._confidence(group_issues, mode)
+            confidence = self._confidence(group_issues, mode, category, context)
+            component_scores = [
+                self._decision_score(issue, context) for issue in group_issues
+            ]
+            decision_score = self._average([score[0] for score in component_scores])
+            impact_score = self._average([score[1] for score in component_scores])
+            business_value = self._average([score[2] for score in component_scores])
+            opportunity_score = self._average([score[3] for score in component_scores])
+            feedback_score = self._average([score[4] for score in component_scores])
+            effort_score = self._effort_score(mode, risk, len(group_issues))
+            feedback = context.feedback_for(category)
+            protected = any(
+                context.objective.is_protected(item.url) for item in evidence
+            )
+            degraded_history = (
+                feedback.total >= self.policy.feedback_min_samples
+                and feedback.degradation_rate >= self.policy.feedback_degradation_limit
+            )
             approval_required = not (
                 mode == "fully_auto"
                 and risk == "low"
                 and confidence >= self.policy.min_auto_confidence
+                and not protected
+                and not degraded_history
             )
             actions.append(PlannedAction(
                 action_id=action_id,
@@ -255,6 +293,16 @@ class SEOPlanningAgent:
                 execution_mode=mode,
                 risk=risk,
                 confidence=confidence,
+                impact_score=impact_score,
+                business_value=business_value,
+                opportunity_score=opportunity_score,
+                feedback_score=feedback_score,
+                effort_score=effort_score,
+                decision_score=decision_score,
+                estimated_hours=self._estimated_hours(mode, risk, len(group_issues)),
+                decision_factors=self._decision_factors(
+                    group_issues, category, context, protected, degraded_history,
+                ),
                 approval_required=approval_required,
                 expected_metrics=self._expected_metrics(category),
                 validation_checks=self._validation_checks(category),
@@ -271,6 +319,7 @@ class SEOPlanningAgent:
         ]
         if not self._capabilities:
             warnings.append("No fixer catalog was supplied; every action is manual")
+        warnings.extend(context.warnings)
 
         return AuditPlan(
             scan_id=scan_id,
@@ -288,6 +337,11 @@ class SEOPlanningAgent:
                 "affected_pages": len({str(getattr(issue, "url", "")) for issue in open_issues}),
                 "priority_tiers": dict(sorted(tier_counts.items())),
                 "execution_modes": dict(sorted(mode_counts.items())),
+                "planning_goal": context.objective.goal,
+                "signal_pages": len(context.page_signals),
+                "feedback_observations": sum(
+                    feedback.total for feedback in context.category_feedback.values()
+                ),
             },
             actions=actions,
             deferred=deferred,
@@ -298,6 +352,7 @@ class SEOPlanningAgent:
                 "Pause expansion when a canary page fails validation",
             ],
             warnings=warnings,
+            min_auto_confidence=self.policy.min_auto_confidence,
         )
 
     async def _add_ai_notes(self, plan: AuditPlan) -> None:
@@ -308,6 +363,8 @@ class SEOPlanningAgent:
                 "title": action.title,
                 "risk": action.risk,
                 "confidence": action.confidence,
+                "decision_score": action.decision_score,
+                "decision_factors": action.decision_factors,
                 "urls": action.urls,
                 "evidence": [item.model_dump() for item in action.evidence],
             }
@@ -365,12 +422,13 @@ class SEOPlanningAgent:
             return ""
         return " ".join(value.split())[:limit]
 
-    @staticmethod
-    def _issue_sort_key(issue: Any) -> tuple[int, float, float, int]:
+    def _issue_sort_key(
+        self, issue: Any, context: PlanningContext,
+    ) -> tuple[int, float, float, int]:
         tier_order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
         return (
             tier_order.get(str(getattr(issue, "priority_tier", "P2")), 2),
-            -float(getattr(issue, "priority_score", 0.0) or 0.0),
+            -self._decision_score(issue, context)[0],
             -float(getattr(issue, "severity", 0.0) or 0.0),
             int(getattr(issue, "id", 0) or 0),
         )
@@ -408,13 +466,135 @@ class SEOPlanningAgent:
             return 4
         return 5
 
+    def _confidence(
+        self,
+        issues: Sequence[Any],
+        mode: ExecutionMode,
+        category: str,
+        context: PlanningContext,
+    ) -> float:
+        evidence = self._average([
+            sum(bool(getattr(issue, field, None)) for field in ("url", "title", "description")) / 3
+            for issue in issues
+        ])
+        diagnosis = self._average([
+            0.55 + 0.4 * float(getattr(issue, "priority_score", 0.0) or 0.0)
+            for issue in issues
+        ])
+        feedback = context.feedback_for(category)
+        reliability = (
+            feedback.score
+            if feedback.total >= self.policy.feedback_min_samples
+            else {"fully_auto": 0.9, "semi_auto": 0.65, "manual_required": 0.45}[mode]
+        )
+        signal_coverage = self._average([
+            context.signals_for(str(getattr(issue, "url", ""))).observed_fields / 5
+            for issue in issues
+        ])
+        impact_confidence = 0.55 + signal_coverage * 0.4
+        return round(min(0.98, evidence * 0.3 + diagnosis * 0.3 + reliability * 0.25 + impact_confidence * 0.15), 2)
+
+    def _decision_score(
+        self, issue: Any, context: PlanningContext,
+    ) -> tuple[float, float, float, float, float]:
+        url = str(getattr(issue, "url", ""))
+        category = str(getattr(issue, "category", "unknown"))
+        impact = self._average([
+            float(getattr(issue, "priority_score", 0.0) or 0.0),
+            float(getattr(issue, "severity", 0.0) or 0.0),
+            float(getattr(issue, "impact_scope", 0.0) or 0.0),
+        ])
+        if not getattr(issue, "impact_scope", None):
+            impact = self._average([
+                float(getattr(issue, "priority_score", 0.0) or 0.0),
+                float(getattr(issue, "severity", 0.0) or 0.0),
+            ])
+        business = context.objective.business_value(url)
+        opportunity = self._opportunity_score(context.signals_for(url))
+        feedback = context.feedback_for(category).score
+        mode, _ = self._capability(category)
+        risk = self._risk(category)
+        effort = self._effort_score(mode, risk, 1)
+        weights = {
+            "organic_visibility": (0.3, 0.2, 0.3, 0.1, 0.1),
+            "qualified_inquiries": (0.25, 0.35, 0.2, 0.1, 0.1),
+            "technical_health": (0.4, 0.1, 0.15, 0.15, 0.2),
+        }[context.objective.goal]
+        decision = (
+            impact * weights[0]
+            + business * weights[1]
+            + opportunity * weights[2]
+            + feedback * weights[3]
+            + (1 - effort) * weights[4]
+        )
+        return (
+            round(decision, 3), round(impact, 3), round(business, 3),
+            round(opportunity, 3), round(feedback, 3),
+        )
+
     @staticmethod
-    def _confidence(issues: Sequence[Any], mode: ExecutionMode) -> float:
-        scores = [float(getattr(issue, "priority_score", 0.0) or 0.0) for issue in issues]
-        average = sum(scores) / max(1, len(scores))
-        evidence_bonus = 0.05 if all(getattr(issue, "description", None) for issue in issues) else 0.0
-        mode_bonus = {"fully_auto": 0.18, "semi_auto": 0.08, "manual_required": 0.0}[mode]
-        return round(min(0.96, 0.5 + average * 0.25 + evidence_bonus + mode_bonus), 2)
+    def _opportunity_score(signals: Any) -> float:
+        observed: list[float] = []
+        if signals.indexed is False:
+            observed.append(1.0)
+        elif signals.indexed is True:
+            observed.append(0.55)
+        if signals.gsc_position is not None:
+            position = signals.gsc_position
+            if 4 <= position <= 20:
+                observed.append(max(0.55, 1 - abs(position - 10) / 20))
+            elif position <= 3:
+                observed.append(0.35)
+            else:
+                observed.append(max(0.3, 0.75 - (position - 20) / 100))
+        if signals.gsc_ctr is not None:
+            observed.append(max(0.25, min(1.0, 1 - signals.gsc_ctr * 8)))
+        if signals.ga_pageviews is not None:
+            views = signals.ga_pageviews
+            observed.append(0.3 if views == 0 else min(0.95, 0.4 + views / 2000))
+        return SEOPlanningAgent._average(observed) if observed else 0.5
+
+    @staticmethod
+    def _effort_score(mode: ExecutionMode, risk: RiskLevel, count: int) -> float:
+        mode_cost = {"fully_auto": 0.2, "semi_auto": 0.5, "manual_required": 0.8}[mode]
+        risk_cost = {"low": 0.15, "medium": 0.45, "high": 0.75}[risk]
+        scale_cost = min(0.2, max(0, count - 1) * 0.02)
+        return round(min(1.0, mode_cost * 0.55 + risk_cost * 0.35 + scale_cost), 3)
+
+    @staticmethod
+    def _estimated_hours(mode: ExecutionMode, risk: RiskLevel, count: int) -> float:
+        base = {"fully_auto": 0.25, "semi_auto": 0.75, "manual_required": 1.5}[mode]
+        multiplier = {"low": 1.0, "medium": 1.5, "high": 2.0}[risk]
+        return round(base * multiplier + max(0, count - 1) * 0.2, 2)
+
+    def _decision_factors(
+        self,
+        issues: Sequence[Any],
+        category: str,
+        context: PlanningContext,
+        protected: bool,
+        degraded_history: bool,
+    ) -> list[str]:
+        factors = [f"planning goal: {context.objective.goal}"]
+        if any(context.objective.business_value(str(getattr(issue, "url", ""))) >= 0.9 for issue in issues):
+            factors.append("priority business page")
+        if any(context.signals_for(str(getattr(issue, "url", ""))).observed_fields for issue in issues):
+            factors.append("traffic or search opportunity signal available")
+        feedback = context.feedback_for(category)
+        if feedback.total:
+            factors.append(
+                f"historical outcomes: {feedback.improved} improved, "
+                f"{feedback.degraded} degraded, {feedback.unchanged} unchanged"
+            )
+        if protected:
+            factors.append("protected page requires approval")
+        if degraded_history:
+            factors.append("historical degradation rate requires approval")
+        return factors
+
+    @staticmethod
+    def _average(values: Sequence[float]) -> float:
+        return round(sum(values) / len(values), 3) if values else 0.0
 
     @staticmethod
     def _evidence(issue: Any) -> PlanEvidence:
