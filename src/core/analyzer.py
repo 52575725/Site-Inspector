@@ -121,6 +121,7 @@ class Analyzer:
         "image_no_lazy_loading": 0.45,
         "image_not_webp": 0.35,
         "image_no_async_decoding": 0.25,
+        "large_images": 0.55,  # oversized images hurt LCP
         # Geo tags
         "missing_geo_region": 0.45,
         "missing_geo_placename": 0.40,
@@ -384,6 +385,7 @@ class Analyzer:
             "missing_geo_region", "missing_geo_placename", "missing_geo_position",
             "image_no_alt", "image_missing_dimensions",
             "image_no_lazy_loading", "image_not_webp", "image_no_async_decoding",
+            "large_images",
             "robots_txt_missing", "robots_txt_empty",
             "robots_txt_no_sitemap", "robots_txt_disallow_all",
             "robots_txt_high_crawl_delay",

@@ -19,8 +19,11 @@ class AltTextGenerator(BaseFixer):
     fix_type = "fully_auto"
     supported_categories = ["missing_alt_text", "empty_alt_text", "image_missing_alt", "image_empty_alt"]
 
-    def __init__(self, ollama: Optional[OllamaClient] = None):
+    def __init__(self, ollama: Optional[OllamaClient] = None,
+                 deepseek_api_key: str = "", deepseek_model: str = "deepseek-chat"):
         self.ollama = ollama
+        self.deepseek_api_key = deepseek_api_key
+        self.deepseek_model = deepseek_model
         self.prompts = PromptManager()
 
     async def generate_fix(self, issue: dict, source: BaseSource,
@@ -62,7 +65,7 @@ class AltTextGenerator(BaseFixer):
         url = issue.get("url", "")
         language = "jp" if "/jp/" in url.lower() else "en"
 
-        # Try Ollama first
+        # Try Ollama first, fall back to DeepSeek, then rule-based
         alt_text = None
         if self.ollama:
             try:
@@ -82,6 +85,11 @@ class AltTextGenerator(BaseFixer):
                     alt_text = result.get("alt_text")
             except Exception:
                 pass
+
+        # DeepSeek fallback
+        if (not alt_text or alt_text in ("DECORATIVE", "IMAGE_NEEDS_MANUAL_REVIEW")) \
+                and self.deepseek_api_key:
+            alt_text = self._deepseek_alt(filename, parent_text, language)
 
         # Rule-based fallback
         if not alt_text or alt_text in ("DECORATIVE", "IMAGE_NEEDS_MANUAL_REVIEW"):
@@ -105,6 +113,61 @@ class AltTextGenerator(BaseFixer):
             after_content=new_content,
             diff="\n".join(diff),
         )
+
+    def _deepseek_alt(self, filename: str, surrounding_text: str,
+                      language: str) -> str | None:
+        """Generate alt text using DeepSeek API."""
+        import asyncio
+        try:
+            import httpx
+            lang_name = {"en": "English", "jp": "Japanese"}.get(language, "English")
+
+            async def _call():
+                async with httpx.AsyncClient(timeout=20) as client:
+                    resp = await client.post(
+                        "https://api.deepseek.com/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {self.deepseek_api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": self.deepseek_model,
+                            "messages": [{
+                                "role": "system",
+                                "content": (
+                                    f"You write concise, SEO-friendly image alt text in {lang_name}. "
+                                    "Describe what the image likely shows based on the filename "
+                                    "and surrounding context. 5-15 words max. Output only the alt text."
+                                ),
+                            }, {
+                                "role": "user",
+                                "content": (
+                                    f"Image filename: {filename}\n"
+                                    f"Surrounding text: {surrounding_text[:300]}\n"
+                                    "Alt text:"
+                                ),
+                            }],
+                            "temperature": 0.3, "max_tokens": 50,
+                        },
+                    )
+                    resp.raise_for_status()
+                    return resp.json()
+
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, _call())
+                    data = future.result(timeout=25)
+            else:
+                data = asyncio.run(_call())
+
+            text = data["choices"][0]["message"]["content"].strip().strip('"\'').strip()
+            if 5 <= len(text) <= 150:
+                return text
+            return None
+        except Exception:
+            return None
 
     @staticmethod
     def _rule_based_alt(filename: str, surrounding_text: str) -> str:

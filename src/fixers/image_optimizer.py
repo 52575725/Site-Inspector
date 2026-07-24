@@ -14,7 +14,10 @@ logger = logging.getLogger(__name__)
 
 class ImageOptimizer(BaseFixer):
     """Fully-auto fix image SEO issues: add dimensions, lazy loading,
-    async decoding, and alt text fallback.
+    async decoding, WebP conversion, and alt text fallback.
+
+    When source provides file-system access (local/git), also performs
+    actual image file conversion to WebP.
     """
 
     fixer_name = "image_optimizer"
@@ -26,6 +29,7 @@ class ImageOptimizer(BaseFixer):
         "image_no_lazy_loading",
         "image_not_webp",
         "image_no_async_decoding",
+        "large_images",  # images exceeding recommended size
     ]
 
     # Default fallback dimensions for common image types
