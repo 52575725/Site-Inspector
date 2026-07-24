@@ -135,7 +135,7 @@ Run the same checks used by CI:
 ```bash
 uv run ruff check .
 uv run python -m compileall -q config src tests
-uv run pytest -q --cov=src --cov-report=term
+uv run python -m pytest -q --cov=src --cov-report=term
 ```
 
 The initial coverage gate is 45 percent. Raise the threshold as the Git,
