@@ -15,7 +15,7 @@ class RobotsTxtFixer(BaseFixer):
     """
 
     fixer_name = "robots_txt_fixer"
-    fix_type = "fully_auto"
+    fix_type = "semi_auto"
     supported_categories = [
         "robots_txt_missing",
         "robots_txt_empty",

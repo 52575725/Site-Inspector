@@ -14,6 +14,7 @@ _GITHUB_REPO_RE = re.compile(
     r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$",
     re.IGNORECASE,
 )
+_LOCAL_WEB_HOSTS = {"127.0.0.1", "localhost", "testserver"}
 
 
 def _is_public_address(value: str) -> bool:
@@ -73,3 +74,12 @@ def validate_github_repo(repo_url: str, branch: str) -> tuple[str, str]:
     if not _BRANCH_RE.fullmatch(branch) or ".." in branch or branch.startswith(("/", "-")):
         raise HTTPException(status_code=400, detail="Invalid repository branch")
     return repo, branch
+
+
+def is_allowed_web_origin(value: str) -> bool:
+    """Allow browser mutations only from the loopback dashboard itself."""
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and parsed.hostname in _LOCAL_WEB_HOSTS

@@ -16,7 +16,7 @@ class AltTextGenerator(BaseFixer):
     """Auto-generate alt text for images using Ollama or rule-based fallback."""
 
     fixer_name = "alt_text_generator"
-    fix_type = "fully_auto"
+    fix_type = "semi_auto"
     supported_categories = ["missing_alt_text", "empty_alt_text", "image_missing_alt", "image_empty_alt"]
 
     def __init__(self, ollama: Optional[OllamaClient] = None,

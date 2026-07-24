@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +11,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from src.web.deps import get_db, templates
+from src.sources.base import resolve_within
+from src.web.security import validate_github_repo
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +20,7 @@ router = APIRouter(tags=["articles"])
 
 GENERATED_DIR = Path("data/generated")
 GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+ARTICLE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 
 
 class GenerateRequest(BaseModel):
@@ -327,6 +331,11 @@ async def list_articles(request: Request):
 @router.post("/api/articles/{article_id}/push")
 async def push_article(request: Request, article_id: str, body: PushRequest):
     """Push a generated article to a GitHub repository."""
+    if not request.app.state.settings.web_allow_repo_writes:
+        raise HTTPException(status_code=403, detail="Repository writes are disabled")
+    if not ARTICLE_ID_RE.fullmatch(article_id):
+        raise HTTPException(status_code=400, detail="Invalid article identifier")
+
     file_path = GENERATED_DIR / f"{article_id}.json"
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Article not found")
@@ -337,13 +346,13 @@ async def push_article(request: Request, article_id: str, body: PushRequest):
     if not body.repo_url:
         raise HTTPException(status_code=400, detail="请填写 GitHub 仓库地址")
 
-    # Parse repo URL to owner/repo format for gh CLI
-    repo_slug = _parse_repo_slug(body.repo_url)
+    repo_url, requested_branch = validate_github_repo(body.repo_url, body.branch)
+    repo_slug = _parse_repo_slug(repo_url)
     if not repo_slug:
         raise HTTPException(status_code=400, detail=f"无法解析仓库地址: {body.repo_url}，请输入如 https://github.com/owner/repo 的格式")
 
     # Determine target file path in repo
-    target_path = body.file_path or f"blog/{article_id}/index.html"
+    target_path = body.file_path.strip() or f"blog/{article_id}/index.html"
     if not target_path.endswith(".html"):
         target_path = target_path.rstrip("/") + "/index.html"
 
@@ -352,52 +361,32 @@ async def push_article(request: Request, article_id: str, body: PushRequest):
     import shutil
     from datetime import datetime
 
-    work_dir = Path("data/site_sources") / f"article_{article_id}"
+    work_dir = Path("data/site_sources") / f"article_{article_id}_{uuid.uuid4().hex[:8]}"
     branch_name = f"article/{article_id}"
+    try:
+        article_file = resolve_within(work_dir, target_path)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Target path must stay inside the repository",
+        ) from exc
 
     errors: list[str] = []
 
     try:
-        # Use existing clone for speed, or do shallow clone
-        existing_clone = Path("data/site_sources") / request.app.state.settings.target_name
-        use_existing = existing_clone.exists() and (existing_clone / ".git").exists()
-
-        if use_existing:
-            work_dir = existing_clone
-            # Pull latest on current branch
-            proc = await asyncio.create_subprocess_exec(
-                "git", "-C", str(work_dir), "pull", "origin",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
-            proc = await asyncio.create_subprocess_exec(
-                "git", "-C", str(work_dir), "rev-parse", "--abbrev-ref", "HEAD",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            out, _ = await proc.communicate()
-            actual_branch = out.decode().strip()
-        else:
-            work_dir = Path("data/site_sources") / f"article_{article_id}"
-            if work_dir.exists():
-                shutil.rmtree(work_dir)
-            actual_branch = body.branch
-            for try_branch in (body.branch, "master", "main"):
-                proc = await asyncio.create_subprocess_exec(
-                    "git", "clone", "--depth", "1", "-b", try_branch, body.repo_url, str(work_dir),
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await proc.communicate()
-                if proc.returncode == 0:
-                    actual_branch = try_branch
-                    break
-                if work_dir.exists():
-                    shutil.rmtree(work_dir, ignore_errors=True)
-            else:
-                err = stderr.decode().strip() if stderr else "unknown error"
-                raise RuntimeError(f"克隆仓库失败 (尝试了 {body.branch}, master, main): {err}")
+        actual_branch = requested_branch
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth", "1", "-b", requested_branch,
+            repo_url, str(work_dir),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            err = stderr.decode().strip() if stderr else "unknown error"
+            raise RuntimeError(f"克隆仓库失败 ({requested_branch}): {err}")
 
         # Write article
-        article_file = work_dir / target_path
+        target_path = article_file.relative_to(work_dir.resolve()).as_posix()
         article_file.parent.mkdir(parents=True, exist_ok=True)
         article_file.write_text(html_content, encoding="utf-8")
 
@@ -467,7 +456,7 @@ async def push_article(request: Request, article_id: str, body: PushRequest):
         # Update article metadata
         data["pushed"] = True
         data["pr_url"] = pr_url
-        data["repo_url"] = body.repo_url
+        data["repo_url"] = repo_url
         data["pushed_at"] = datetime.utcnow().isoformat()
         file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -477,8 +466,7 @@ async def push_article(request: Request, article_id: str, body: PushRequest):
         logger.error(f"Article push failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="推送失败，请检查仓库地址和网络连接后重试。")
     finally:
-        # Cleanup — only delete if it was a temp clone, not the existing repo
-        if not use_existing and work_dir.exists():
+        if work_dir.exists():
             shutil.rmtree(work_dir, ignore_errors=True)
 
 

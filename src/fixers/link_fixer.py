@@ -14,7 +14,7 @@ class LinkFixer(BaseFixer):
     """Auto-fix broken internal links and mixed content (HTTP→HTTPS upgrade)."""
 
     fixer_name = "link_fixer"
-    fix_type = "fully_auto"
+    fix_type = "semi_auto"
     supported_categories = ["http_404", "http_500", "mixed_content",
                            "redirect_chain", "link_timeout"]
 

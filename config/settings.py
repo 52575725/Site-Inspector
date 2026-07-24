@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     # Auto-fix
     auto_fix_sandbox_diff_auto: float = 0.05
     auto_fix_sandbox_diff_review: float = 0.15
-    auto_fix_max_per_scan: int = 500
+    auto_fix_max_per_scan: int = 50
 
     # Verification
     verification_observation_days: int = 14

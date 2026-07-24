@@ -21,7 +21,7 @@ class ImageOptimizer(BaseFixer):
     """
 
     fixer_name = "image_optimizer"
-    fix_type = "fully_auto"
+    fix_type = "semi_auto"
     supported_categories = [
         "image_no_alt",
         "image_empty_alt",

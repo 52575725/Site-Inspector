@@ -24,32 +24,32 @@ class MobileCssFixer(BaseFixer):
 
     CSS_TEMPLATES = {
         "small_font_size": """
-/* [Site Inspector] Ensure minimum 16px font size for mobile readability */
+/* [Site Inspector:small_font_size] */
 @media (max-width: 768px) {
-    body, p, li, span, a, div, td, th, label, input, textarea, select, button {
-        font-size: 16px !important;
+    body {
+        font-size: 16px;
+    }
+    input, textarea, select, button {
+        font-size: 1rem;
     }
 }""",
         "small_touch_targets": """
-/* [Site Inspector] Ensure minimum 48px touch targets for mobile */
+/* [Site Inspector:small_touch_targets] */
 @media (pointer: coarse) {
-    a, button, [role="button"], input[type="submit"], input[type="button"],
-    .btn, .button, [onclick] {
-        min-width: 48px;
-        min-height: 48px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
+    button, [role="button"], input[type="submit"], input[type="button"],
+    .btn, .button {
+        min-height: 44px;
     }
 }""",
         "horizontal_scroll": """
-/* [Site Inspector] Prevent horizontal overflow on all viewports */
-html, body {
-    overflow-x: hidden;
-    max-width: 100vw;
+/* [Site Inspector:horizontal_scroll] */
+body {
+    overflow-wrap: anywhere;
 }
 img, table, pre, iframe, video, canvas, svg {
     max-width: 100%;
+}
+img, video, canvas, svg {
     height: auto;
 }""",
     }
@@ -72,21 +72,14 @@ img, table, pre, iframe, video, canvas, svg {
 
         css_rule = self.CSS_TEMPLATES[category]
 
-        # Idempotency check: extract <style> tag contents and search for
-        # the Site Inspector marker for this specific category. Using regex
-        # on the raw HTML rather than BeautifulSoup avoids reformatting issues
-        # and gives us the exact style content to search.
-        style_contents = " ".join(
-            re.findall(r"<style[^>]*>(.*?)</style>", page_content, re.DOTALL | re.IGNORECASE)
-        )
-        cat_marker = self._get_rule_description(category)
-        if cat_marker.lower() in style_contents.lower():
+        marker = f"/* [Site Inspector:{category}] */"
+        if marker in page_content:
             return FixResult(
                 success=False, issue_id=issue_id,
                 fixer_name=self.fixer_name, fix_type=self.fix_type,
                 file_path=file_path,
                 before_content=page_content, after_content=page_content,
-                error_message=f"CSS fix for '{category}' already applied (found in <style> tag)",
+                error_message=f"CSS fix for '{category}' already applied",
             )
 
         # Inject CSS using string manipulation (more reliable than BS4 parsing)
