@@ -209,6 +209,11 @@ class ScanOrchestrator:
                             link_target = urljoin(cp.url, href).rstrip("/")
                             incoming.setdefault(link_target, set()).add(cp.url)
                 insp.set_incoming_links(incoming)
+            if isinstance(insp, CompetitorGapInspector):
+                insp.set_page_data([
+                    {"url": cp.url, "title": cp.title, "h1": ""}
+                    for cp in crawled_pages
+                ])
 
         # Run inspectors concurrently per page
         http_client = httpx.AsyncClient(timeout=15)

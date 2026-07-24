@@ -46,6 +46,7 @@ class CompetitorGapInspector(BaseInspector):
         self.competitor_urls = competitor_urls or []
         self.timeout = timeout
         self._competitor_profiles: dict[str, dict] = {}
+        self._page_data: list[dict] = []
         self._fetched = False
 
     async def setup(self) -> None:
@@ -54,15 +55,29 @@ class CompetitorGapInspector(BaseInspector):
     async def teardown(self) -> None:
         pass
 
+    # ── Public API: called by scan orchestrator ───────────────────
+
+    def set_page_data(self, pages: list[dict]) -> None:
+        """Receive crawled page metadata for keyword extraction.
+
+        Called by ScanOrchestrator before inspect() to enable
+        auto-discovery when competitor_urls is empty.
+        """
+        self._page_data = pages
+
     async def inspect(self, url: str, html_content: str,
                       headers: dict | None = None) -> list[RawFinding]:
         findings: list[RawFinding] = []
 
-        if not self.competitor_urls or not html_content:
+        if not html_content:
             return findings
 
         if not self._fetched:
-            await self._fetch_all_competitors()
+            # Auto-discover competitors if none configured
+            if not self.competitor_urls:
+                await self._auto_discover()
+            if self.competitor_urls:
+                await self._fetch_all_competitors()
             self._fetched = True
 
         if not self._competitor_profiles:
@@ -229,6 +244,32 @@ class CompetitorGapInspector(BaseInspector):
         return findings
 
     # ── Fetch + Profile ──────────────────────────────────────────────
+
+    async def _auto_discover(self) -> None:
+        """Auto-discover competitors when none are manually configured."""
+        from src.inspectors.competitor_discovery import (
+            discover_competitors, extract_keywords_from_pages,
+        )
+        # Extract keywords from crawled page data
+        page_data = self._page_data if self._page_data else []
+        keywords = extract_keywords_from_pages(
+            pages=page_data,
+            your_domain="helinsilver.com",
+        )
+        if not keywords:
+            logger.info("No keywords extracted, skipping competitor auto-discovery")
+            return
+
+        discovered = await discover_competitors(
+            keywords=keywords,
+            your_domain="helinsilver.com",
+            max_competitors=5,
+        )
+        if discovered:
+            self.competitor_urls = discovered
+            logger.info(
+                f"Auto-discovered {len(discovered)} competitors: {discovered}"
+            )
 
     async def _fetch_all_competitors(self) -> None:
         """Fetch, profile, and snapshot all competitor URLs once per scan.
