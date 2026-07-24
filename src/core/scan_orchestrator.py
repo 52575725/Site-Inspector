@@ -20,6 +20,7 @@ from src.inspectors.accessibility import AccessibilityInspector
 from src.inspectors.base import RawFinding
 from src.inspectors.broken_links import BrokenLinksInspector
 from src.inspectors.cannibalization import CannibalizationDetector
+from src.inspectors.competitor_gap import CompetitorGapInspector
 from src.inspectors.content_freshness import ContentFreshnessInspector
 from src.inspectors.content_gap import ContentGapDetector
 from src.inspectors.content_quality import ContentQualityInspector
@@ -338,9 +339,12 @@ class ScanOrchestrator:
 
     def _create_inspectors(self) -> list:
         http_client = httpx.AsyncClient(timeout=15, follow_redirects=False)
+        target_config = self.settings.__class__.load_target(self.settings.target_name)
+        competitor_urls = target_config.get("competitors", [])
         return [
             SEOInspector(),
             BrokenLinksInspector(client=http_client),
+            CompetitorGapInspector(competitor_urls=competitor_urls),
             HeadersInspector(),
             CannibalizationDetector(),
             JSSeoInspector(),
