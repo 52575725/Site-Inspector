@@ -203,7 +203,7 @@ class FixOrchestrator:
         # ── Group issues by file path so all fixes for a page ──
         #     are chained through a single BeautifulSoup instance.
         #     This prevents HTML degradation from repeated parse→serialize cycles.
-        MAX_FIXES_PER_FILE = 10  # Allow more fully_auto fixes per page
+        MAX_FIXES_PER_FILE = 50  # effectively unlimited per page
         page_groups: dict[str, list[tuple]] = {}  # file_path → [(issue, fixer), ...]
 
         for issue in fixable:
