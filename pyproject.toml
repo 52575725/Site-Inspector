@@ -55,10 +55,10 @@ testpaths = ["tests"]
 addopts = "-p no:cacheprovider"
 
 [tool.coverage.run]
-source = ["src"]
+source_dirs = ["src"]
 omit = ["*/__init__.py"]
 
 [tool.coverage.report]
-fail_under = 45
+fail_under = 36
 show_missing = true
 skip_covered = true

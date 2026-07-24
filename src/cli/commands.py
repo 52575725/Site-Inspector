@@ -36,13 +36,16 @@ def scan_run(
     target: str = typer.Option("helinsilver", help="Target name from config"),
     inspectors: str = typer.Option("all", help="Inspectors to run (comma-separated)"),
     pages: Optional[int] = typer.Option(None, help="Limit to N pages"),
+    apply_fixes: bool = typer.Option(
+        False, "--apply-fixes", help="Explicitly apply eligible fixes during the scan",
+    ),
 ):
     """Run a full site inspection scan now."""
     async def _run():
         await init_db()
         engine = _create_engine()
         try:
-            result = await engine.run_daily_scan()
+            result = await engine.run_daily_scan(dry_run=not apply_fixes)
             console.print(f"[green]Scan completed![/green]")
             console.print(f"  Pages crawled: {result['pages']}")
             console.print(f"  Issues found: {result['new_issues']}")
@@ -58,7 +61,9 @@ def scan_run(
 def fix_run(
     scan_id: Optional[int] = typer.Option(None, help="Fix issues from specific scan"),
     auto_only: bool = typer.Option(False, help="Only apply fully-auto (P0) fixes"),
-    dry_run: bool = typer.Option(False, help="Generate fixes without applying"),
+    dry_run: bool = typer.Option(
+        True, "--dry-run/--apply", help="Preview fixes unless --apply is explicitly set",
+    ),
 ):
     """Analyze and auto-fix issues from a scan."""
     async def _run():
