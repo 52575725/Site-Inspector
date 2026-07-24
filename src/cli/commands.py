@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 scan_cmd = typer.Typer(name="scan", help="Run site inspection scans")
+plan_cmd = typer.Typer(name="plan", help="Generate evidence-based optimization plans")
 fix_cmd = typer.Typer(name="fix", help="Run auto-fixes")
 verify_cmd = typer.Typer(name="verify", help="Check fix verifications")
 report_cmd = typer.Typer(name="report", help="Generate reports")
@@ -90,21 +91,129 @@ def fix_run(
 
             from src.core.analyzer import Analyzer
             from src.core.fix_orchestrator import FixOrchestrator
+            from src.agents.seo_planning_agent import SEOPlanningAgent
 
             analyzer = Analyzer(settings, session)
             issues = await analyzer.analyze_scan(scan.id, scan.pages_crawled)
 
             fixer = FixOrchestrator(settings, session, ollama=engine.ollama)
-            fixes = await fixer.run_fixes(issues, dry_run=dry_run)
+            planner = SEOPlanningAgent(fixer.fixers)
+            plan = await planner.create_plan(
+                issues,
+                scan_id=scan.id,
+                target_name=settings.target_name,
+            )
+            plan_path = (
+                settings.data_dir / "reports" / "plans"
+                / f"scan-{scan.id}-plan.json"
+            )
+            plan.write_json(plan_path)
+            planned_issues = plan.select_issues(issues, dry_run=dry_run)
+            fixes = await fixer.run_fixes(planned_issues, dry_run=dry_run)
 
             if dry_run:
                 console.print(f"[yellow]Dry run: {len(fixes)} fixes would be applied[/yellow]")
             else:
                 console.print(f"[green]{len(fixes)} fixes applied![/green]")
+            console.print(f"  Plan: {plan_path}")
+            console.print(
+                f"  Approval required: "
+                f"{sum(action.approval_required for action in plan.actions)} action(s)"
+            )
 
             await session.commit()
 
         await engine.close()
+
+    asyncio.run(_run())
+
+
+@plan_cmd.command("generate")
+def plan_generate(
+    scan_id: Optional[int] = typer.Option(None, help="Plan issues from a specific scan"),
+    objective: str = typer.Option(
+        "Improve qualified organic visibility without unreviewed business changes",
+        help="Business objective that constrains the plan",
+    ),
+    output: Optional[Path] = typer.Option(None, help="Output JSON path"),
+    use_ai: bool = typer.Option(False, "--ai", help="Add bounded DeepSeek planning notes"),
+):
+    """Generate a read-only optimization plan from scan evidence."""
+    async def _run():
+        await init_db()
+        settings = Settings.load()
+        factory = get_session_factory(settings)
+        reasoner = None
+
+        if use_ai:
+            if not settings.deepseek_api_key:
+                console.print("[red]SI_DEEPSEEK_API_KEY is required for --ai[/red]")
+                return
+            from src.ai.deepseek_client import DeepSeekClient
+            reasoner = DeepSeekClient(
+                api_key=settings.deepseek_api_key,
+                model=settings.deepseek_model,
+                timeout=settings.deepseek_timeout,
+            )
+
+        try:
+            async with factory() as session:
+                from src.agents.seo_planning_agent import SEOPlanningAgent
+                from src.core.analyzer import Analyzer
+                from src.core.fix_orchestrator import FixOrchestrator
+                from src.storage.repositories import ScanRepository, TargetRepository
+
+                scan_repo = ScanRepository(session)
+                if scan_id:
+                    scan = await scan_repo.get_by_id(scan_id)
+                else:
+                    target_repo = TargetRepository(session)
+                    target = await target_repo.get_by_name(settings.target_name)
+                    scan = await scan_repo.get_latest(target.id) if target else None
+                if not scan:
+                    console.print("[red]No scan found. Run a scan first.[/red]")
+                    return
+
+                analyzer = Analyzer(settings, session)
+                issues = await analyzer.analyze_scan(scan.id, scan.pages_crawled)
+                fixer = FixOrchestrator(settings, session)
+                planner = SEOPlanningAgent(fixer.fixers, reasoner=reasoner)
+                plan = await planner.create_plan(
+                    issues,
+                    scan_id=scan.id,
+                    target_name=settings.target_name,
+                    objective=objective,
+                    use_ai=use_ai,
+                )
+                destination = output or (
+                    settings.data_dir / "reports" / "plans"
+                    / f"scan-{scan.id}-plan.json"
+                )
+                plan.write_json(destination)
+                await session.commit()
+
+                table = Table(title=f"SEO Plan for scan {scan.id}")
+                table.add_column("ID")
+                table.add_column("Phase")
+                table.add_column("Action")
+                table.add_column("Risk")
+                table.add_column("Mode")
+                table.add_column("Approval")
+                for action in plan.actions:
+                    table.add_row(
+                        action.action_id,
+                        str(action.phase),
+                        action.title,
+                        action.risk,
+                        action.execution_mode,
+                        "yes" if action.approval_required else "no",
+                    )
+                console.print(table)
+                console.print(plan.executive_summary)
+                console.print(f"[green]Plan written to {destination}[/green]")
+        finally:
+            if reasoner:
+                await reasoner.close()
 
     asyncio.run(_run())
 

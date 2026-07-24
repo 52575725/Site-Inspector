@@ -21,6 +21,9 @@ are disabled in the web application by default, and only deterministic
   Lighthouse integration, and mobile CSS checks.
 - Controlled remediation: dry runs, approval classification, per-page fix
   limits, pre-change snapshots, validation, rollback, Git branches, and PRs.
+- Evidence-bound planning: a deterministic SEO Planning Agent orders work by
+  phase, records dependencies and expected metrics, and separates unattended
+  low-risk fixes from changes requiring approval.
 - Measurement: Google Search Console and Analytics integrations, scheduled
   scans, reports, and post-fix verification checkpoints.
 
@@ -105,6 +108,21 @@ Run a scan and inspect status:
 ```bash
 uv run site-inspector scan run --target helinsilver
 uv run site-inspector status --target helinsilver
+```
+
+Generate a versioned, read-only optimization plan from the latest scan:
+
+```bash
+uv run site-inspector plan generate
+```
+
+The plan is written to `data/reports/plans/` and includes evidence, ordering,
+risk, confidence, approval requirements, validation checks, rollback
+conditions, and deferred findings. Optional AI notes are bounded to existing
+actions and require `SI_DEEPSEEK_API_KEY`:
+
+```bash
+uv run site-inspector plan generate --ai
 ```
 
 Generate fixes as a dry run before allowing writes:
