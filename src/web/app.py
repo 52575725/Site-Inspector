@@ -3,10 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from config.settings import Settings
 from src.storage.database import get_session_factory, init_db
+from src.web.security import is_allowed_web_origin
 from src.web.routes.articles import router as articles_router
 from src.web.routes.dashboard import router as dashboard_router
 from src.web.routes.fixes import router as fixes_router
@@ -22,6 +25,23 @@ BASE_DIR = Path(__file__).resolve().parent
 def create_app() -> FastAPI:
     settings = Settings.load()
     app = FastAPI(title="Site Inspector Dashboard", version="0.1.0")
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=["127.0.0.1", "localhost", "testserver"],
+    )
+
+    @app.middleware("http")
+    async def protect_local_mutations(request, call_next):
+        if request.url.path.startswith("/api/") and request.method in {
+            "POST", "PUT", "PATCH", "DELETE",
+        }:
+            origin = request.headers.get("origin")
+            if origin and not is_allowed_web_origin(origin):
+                return JSONResponse(
+                    {"detail": "Cross-origin API mutations are not allowed"},
+                    status_code=403,
+                )
+        return await call_next(request)
 
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 

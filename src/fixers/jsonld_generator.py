@@ -12,13 +12,13 @@ from src.sources.base import BaseSource
 
 # Required schema types per page type (for completeness checking)
 REQUIRED_SCHEMAS: dict[str, list[str]] = {
-    "Organization": ["Organization", "WebSite", "BreadcrumbList"],
-    "Product": ["Product", "Organization", "BreadcrumbList"],
-    "Article": ["Article", "Organization", "BreadcrumbList"],
-    "BreadcrumbList": ["Organization", "BreadcrumbList", "ItemList"],
-    "WebPage": ["Organization", "BreadcrumbList"],
-    "FAQ": ["FAQPage", "Organization", "BreadcrumbList"],
-    "HowTo": ["HowTo", "Organization", "BreadcrumbList"],
+    "Home": ["Organization", "WebSite"],
+    "Product": ["Product", "BreadcrumbList"],
+    "Article": ["Article", "BreadcrumbList"],
+    "CollectionPage": ["CollectionPage", "BreadcrumbList"],
+    "WebPage": ["WebPage", "BreadcrumbList"],
+    "FAQ": ["FAQPage", "BreadcrumbList"],
+    "HowTo": ["HowTo", "BreadcrumbList"],
 }
 
 
@@ -26,7 +26,7 @@ class JsonLdGenerator(BaseFixer):
     """Auto-generate JSON-LD structured data for pages."""
 
     fixer_name = "jsonld_generator"
-    fix_type = "fully_auto"
+    fix_type = "semi_auto"
     supported_categories = ["missing_structured_data", "invalid_jsonld", "schema_missing_type", "schema_missing_field"]
 
     def __init__(self, org_name: str = "", org_alt_name: str = "",
@@ -57,13 +57,13 @@ class JsonLdGenerator(BaseFixer):
 
         # Determine which schemas to generate
         page_type = self._guess_page_type(url, soup)
-        required = REQUIRED_SCHEMAS.get(page_type, ["Organization", "WebSite"])
+        required = REQUIRED_SCHEMAS.get(page_type, ["WebPage", "BreadcrumbList"])
         missing_types = [t for t in required if t not in existing_types]
 
         # For schema_missing_type, only generate the specific missing type
         if category == "schema_missing_type":
             suggested = issue.get("suggested_value", "")
-            if suggested and suggested in required and suggested not in existing_types:
+            if suggested and suggested in required:
                 missing_types = [suggested]
 
         # IMPORTANT: no fallback that re-introduces already-present types.
@@ -129,16 +129,20 @@ class JsonLdGenerator(BaseFixer):
             return self._article_schema(url, title, description, soup)
         if page_type == "BreadcrumbList":
             return self._breadcrumb_schema(url)
-        if page_type == "FAQ":
+        if page_type in ("FAQ", "FAQPage"):
             return self._faq_schema(soup)
         if page_type == "HowTo":
             return self._howto_schema(url, title, description, soup)
+        if page_type == "CollectionPage":
+            return self._webpage_schema("CollectionPage", url, title, description)
+        if page_type == "WebPage":
+            return self._webpage_schema("WebPage", url, title, description)
         return self._website_schema(url, title, description)
 
     def _org_schema(self, url: str, title: str, description: str) -> dict:
         schema = {
             "@context": "https://schema.org",
-            "@type": "LocalBusiness",
+            "@type": "Organization",
             "name": self.org_name,
             "alternateName": self.org_alt_name,
             "url": url,
@@ -160,7 +164,7 @@ class JsonLdGenerator(BaseFixer):
         import re
         body_text = soup.get_text(separator=" ", strip=True) if soup else ""
         price_match = re.search(
-            r"(?:USD|US\$|\\$|HK\$|HKD)\s*([\d,]+\.?\d*)",
+            r"(?:USD|US\$|\$|HK\$|HKD)\s*([\d,]+\.?\d*)",
             body_text, re.IGNORECASE,
         )
         currency = "USD"
@@ -176,14 +180,13 @@ class JsonLdGenerator(BaseFixer):
             "name": title or "Silver Products",
             "description": description or title,
             "url": url,
-            "offers": {
-                "@type": "Offer",
-                "availability": "https://schema.org/InStock",
-                "priceCurrency": currency,
-            },
         }
         if price:
-            schema["offers"]["price"] = price
+            schema["offers"] = {
+                "@type": "Offer",
+                "price": price,
+                "priceCurrency": currency,
+            }
         # Add image if page has a product image
         main_img = soup.find("img", attrs={"class": re.compile(r"product|hero|main", re.I)})
         if not main_img:
@@ -198,22 +201,36 @@ class JsonLdGenerator(BaseFixer):
 
     def _article_schema(self, url: str, title: str, description: str,
                         soup: BeautifulSoup) -> dict:
-        return {
+        schema = {
             "@context": "https://schema.org",
             "@type": "Article",
             "headline": title,
             "description": description,
             "url": url,
+            "mainEntityOfPage": {"@type": "WebPage", "@id": url},
         }
+        author = soup.find("meta", attrs={"name": "author"})
+        published = soup.find("meta", attrs={"property": "article:published_time"})
+        image = soup.find("meta", attrs={"property": "og:image"})
+        if author and author.get("content"):
+            schema["author"] = {"@type": "Person", "name": author["content"]}
+        if published and published.get("content"):
+            schema["datePublished"] = published["content"]
+        if image and image.get("content"):
+            schema["image"] = image["content"]
+        return schema
 
     def _breadcrumb_schema(self, url: str) -> dict:
         path_parts = urlparse(url).path.strip("/").split("/")
-        items = []
+        items = [{
+            "@type": "ListItem",
+            "position": 1,
+            "name": "Home",
+            "item": f"{self.domain}/",
+        }]
         accumulated = ""
-        position = 1
+        position = 2
         for part in path_parts:
-            if part == "jp":
-                continue
             accumulated += f"/{part}"
             name = part.replace("-", " ").title() if part else "Home"
             items.append({
@@ -237,13 +254,14 @@ class JsonLdGenerator(BaseFixer):
         for details in soup.find_all("details"):
             summary = details.find("summary")
             question = summary.get_text(strip=True) if summary else ""
-            # Answer = everything in <details> except <summary>
-            if summary:
-                summary.decompose()
-            answer = details.get_text(separator=" ", strip=True)
-            if summary:
-                # Restore for idempotency
-                details.insert(0, summary)
+            details_copy = BeautifulSoup(str(details), "html.parser").find("details")
+            summary_copy = details_copy.find("summary") if details_copy else None
+            if summary_copy:
+                summary_copy.decompose()
+            answer = (
+                details_copy.get_text(separator=" ", strip=True)
+                if details_copy else ""
+            )
             if question and answer and len(question) > 5 and len(answer) > 20:
                 main_entities.append({
                     "@type": "Question",
@@ -354,39 +372,54 @@ class JsonLdGenerator(BaseFixer):
         }
 
     @staticmethod
+    def _webpage_schema(schema_type: str, url: str, title: str,
+                        description: str) -> dict:
+        return {
+            "@context": "https://schema.org",
+            "@type": schema_type,
+            "name": title,
+            "description": description,
+            "url": url,
+        }
+
+    @staticmethod
     def _get_existing_types(soup: BeautifulSoup) -> set[str]:
         """Get all @type values from existing JSON-LD scripts on the page."""
         types = set()
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string)
-                if isinstance(data, dict):
-                    t = data.get("@type", "")
-                    if isinstance(t, str):
-                        types.add(t)
-                    elif isinstance(t, list):
-                        types.update(t)
-                elif isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, dict):
-                            t = item.get("@type", "")
-                            if isinstance(t, str):
-                                types.add(t)
+                JsonLdGenerator._collect_types(data, types)
             except (json.JSONDecodeError, TypeError):
                 pass
         return types
 
     @staticmethod
+    def _collect_types(value, types: set[str]) -> None:
+        if isinstance(value, dict):
+            schema_type = value.get("@type")
+            if isinstance(schema_type, str):
+                types.add(schema_type)
+            elif isinstance(schema_type, list):
+                types.update(item for item in schema_type if isinstance(item, str))
+            for item in value.values():
+                JsonLdGenerator._collect_types(item, types)
+        elif isinstance(value, list):
+            for item in value:
+                JsonLdGenerator._collect_types(item, types)
+
+    @staticmethod
     def _guess_page_type(url: str, soup: BeautifulSoup | None = None) -> str:
-        path = urlparse(url).path.lower().rstrip("/")
-        if path in ("", "/"):
-            return "Organization"
-        if "/blog/" in path and path.count("/") > 2:
+        parts = [part for part in urlparse(url).path.lower().split("/") if part]
+        if not parts:
+            return "Home"
+        if "blog" in parts and parts[-1] != "blog":
             return "Article"
-        if "/products/" in path:
+        if "products" in parts and parts[-1] != "products":
             return "Product"
-        if "/blog" == path:
-            return "BreadcrumbList"
+        if parts[-1] in {"blog", "products"}:
+            return "CollectionPage"
+        path = "/" + "/".join(parts)
         if "/faq" in path or "/questions" in path:
             return "FAQ"
         if "/guide" in path or "/how-to" in path or "/tutorial" in path:

@@ -182,6 +182,7 @@ class FixOrchestrator:
         changed_files: set[str] = set()
         page_cache: dict[str, str] = {}
         skip_reasons: dict[str, int] = {}
+        issue_by_id = {issue.id: issue for issue in fixable}
 
         # ── Pre-fix snapshot: save original content BEFORE any fixer runs ──
         original_snapshots: dict[str, str] = {}
@@ -209,6 +210,13 @@ class FixOrchestrator:
             fixer = self._find_fixer(issue.category)
             if not fixer:
                 reason = f"no fixer for category '{issue.category}'"
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                logger.info(f"Skipping issue #{issue.id} ({issue.url}): {reason}")
+                continue
+
+            # Only deterministic fixes may modify a repository without review.
+            if not dry_run and fixer.fix_type != "fully_auto":
+                reason = f"fixer '{fixer.fixer_name}' requires approval"
                 skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
                 logger.info(f"Skipping issue #{issue.id} ({issue.url}): {reason}")
                 continue
@@ -308,19 +316,12 @@ class FixOrchestrator:
                 await source.write_file(file_path, page_content)
                 changed_files.add(file_path)
 
-        # Commit and create PR (only when we own the source)
-        if is_git and changed_files and not dry_run:
+        # Validate every real write path before a caller can commit or push.
+        if changed_files and not dry_run:
             # ── Post-fix validation: rollback corrupted files ──────
             # Use pre-fix snapshots (saved BEFORE any fixer modified the files)
             validated_files = set()
             failed_files = set()
-            # Re-read current on-disk state for newly created files
-            for fp in changed_files:
-                if fp not in original_snapshots:
-                    try:
-                        original_snapshots[fp] = await source.read_file(fp)
-                    except Exception:
-                        pass
             for fp in changed_files:
                 if fp in page_cache and fp in original_snapshots:
                     result = validate_html(fp, original_snapshots[fp], page_cache[fp])
@@ -334,9 +335,13 @@ class FixOrchestrator:
                             await source.write_file(fp, original_snapshots[fp])
                             page_cache[fp] = original_snapshots[fp]
                         except Exception:
-                            pass
+                            logger.exception("Failed to roll back %s", fp)
                 else:
-                    validated_files.add(fp)  # new files are fine
+                    failed_files.add(fp)
+                    logger.error(
+                        "Validation failed for %s: original snapshot is unavailable",
+                        fp,
+                    )
 
             if failed_files:
                 logger.warning(
@@ -344,7 +349,17 @@ class FixOrchestrator:
                     f"{len(failed_files)} rolled back: {', '.join(sorted(failed_files))}"
                 )
                 changed_files = validated_files
-                # Remove fixes for failed files
+                failed_fixes = [
+                    fix for fix in applied_fixes
+                    if fix.file_path in failed_files
+                ]
+                for fix in failed_fixes:
+                    fix.status = "validation_failed"
+                    fix.applied_at = None
+                    await self.issue_repo.update_status(fix.issue_id, "open")
+                    issue = issue_by_id.get(fix.issue_id)
+                    if issue is not None:
+                        issue.fix_applied_at = None
                 applied_fixes = [
                     f for f in applied_fixes
                     if f.file_path not in failed_files
@@ -352,21 +367,25 @@ class FixOrchestrator:
 
             if not changed_files:
                 logger.warning("All changed files failed validation — aborting commit")
+                await self.session.commit()
                 return applied_fixes
 
+        # Commit and create PR (only when we own the source)
+        if is_git and changed_files and not dry_run:
             auto_count = sum(1 for f in applied_fixes if f.fix_type == "fully_auto")
             pr_title = generate_pr_title(
                 fixable[0].scan_id, len(applied_fixes), auto_count,
             )
             fixes_data = [
                 {
-                    "category": i.category,
-                    "description": i.description,
-                    "url": i.url,
-                    "fix_type": f.fix_type,
-                    "diff": f.diff,
+                    "category": issue_by_id[fix.issue_id].category,
+                    "description": issue_by_id[fix.issue_id].description,
+                    "url": issue_by_id[fix.issue_id].url,
+                    "fix_type": fix.fix_type,
+                    "diff": fix.diff,
                 }
-                for i, f in zip(fixable, applied_fixes) if f.diff
+                for fix in applied_fixes
+                if fix.diff and fix.issue_id in issue_by_id
             ]
             pr_body = generate_pr_body(fixes_data, fixable[0].scan_id,
                                        self.settings.target_name)

@@ -112,16 +112,7 @@ class MetaFixer(BaseFixer):
                               issue: dict) -> str:
         desc = soup.find("meta", attrs={"name": "description"})
 
-        # Extract meaningful page content for description generation
-        body_text = soup.get_text(separator=" ", strip=True)
-        # Try to skip navigation text: find text after the first H1 or main content
-        h1 = soup.find("h1")
-        if h1:
-            h1_text = h1.get_text(separator=" ", strip=True)
-            h1_pos = body_text.find(h1_text)
-            if h1_pos > 0:
-                body_text = body_text[h1_pos:]
-        page_text = body_text[:500]
+        page_text = self._extract_description_text(soup)
 
         # Try AI generation first when API key is available
         if self.deepseek_api_key:
@@ -133,6 +124,7 @@ class MetaFixer(BaseFixer):
                 url=issue.get("url", ""),
             )
             if ai_desc:
+                ai_desc = self._trim_description(ai_desc)
                 if not desc:
                     head = soup.find("head")
                     if head:
@@ -150,18 +142,60 @@ class MetaFixer(BaseFixer):
             if head:
                 new_desc = soup.new_tag("meta", attrs={
                     "name": "description",
-                    "content": page_text[:160],
+                    "content": page_text,
                 })
                 head.append(new_desc)
         elif desc.get("content") and len(desc["content"].strip()) < 120:
-            desc["content"] = page_text[:160]
+            if page_text:
+                desc["content"] = page_text
         elif desc.get("content") and len(desc["content"].strip()) > 165:
-            content = desc["content"].strip()
-            cut = content.rfind(" ", 0, 160)
-            if cut > 80:
-                desc["content"] = content[:cut]
+            desc["content"] = self._trim_description(desc["content"])
 
         return str(soup)
+
+    @staticmethod
+    def _trim_description(text: str) -> str:
+        text = " ".join(text.split())
+        if len(text) <= 160:
+            return text.rstrip(" ,.;:，。；：")
+
+        sentence_cut = max(
+            text.rfind(". ", 0, 157),
+            text.rfind("。", 0, 157),
+            text.rfind("! ", 0, 157),
+            text.rfind("? ", 0, 157),
+        )
+        word_cut = text.rfind(" ", 0, 157)
+        cut = sentence_cut + 1 if sentence_cut >= 80 else word_cut
+        if cut < 80:
+            cut = 157
+        return text[:cut].rstrip(" ,.;:，。；：")
+
+    @staticmethod
+    def _extract_description_text(soup: BeautifulSoup) -> str:
+        """Build a natural description from main content, excluding site chrome."""
+        container = soup.find("main") or soup.find("article") or soup.find("body")
+        if not container:
+            return ""
+
+        fragment = BeautifulSoup(str(container), "html.parser")
+        for tag in fragment.find_all([
+            "nav", "header", "footer", "script", "style", "form", "button",
+        ]):
+            tag.decompose()
+
+        candidates = []
+        for paragraph in fragment.find_all("p"):
+            text = " ".join(paragraph.get_text(" ", strip=True).split())
+            if len(text) >= 40:
+                candidates.append(text)
+            if sum(len(item) for item in candidates) >= 220:
+                break
+
+        text = " ".join(candidates)
+        if not text:
+            text = " ".join(fragment.get_text(" ", strip=True).split())
+        return MetaFixer._trim_description(text)
 
     def _fix_og_tags(self, soup: BeautifulSoup, html: str,
                      issue: dict) -> str:
@@ -348,7 +382,7 @@ class MetaFixer(BaseFixer):
             text = data["choices"][0]["message"]["content"].strip()
             text = text.strip('"\'').strip()
             if 80 <= len(text) <= 200:
-                return text[:160]
+                return self._trim_description(text)
             logger.debug(f"AI description rejected (len={len(text)}): {text[:80]}...")
             return None
         except Exception as e:
