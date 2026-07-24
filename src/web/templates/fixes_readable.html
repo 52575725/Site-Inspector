@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}修复建议 | Site Inspector{% endblock %}
+{% block page_title %}修复建议{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/fix-review.css">{% endblock %}
+{% block content %}
+<div class="filter-bar">
+    <select id="filter-status" class="filter-select">
+        <option value="">全部状态</option><option value="proposed">等待批准</option>
+        <option value="approved">已批准</option><option value="applied">已应用</option>
+        <option value="rejected">已拒绝</option><option value="rollback_required">需要恢复</option>
+    </select>
+    <button id="filter-apply" class="btn btn-primary">筛选</button>
+</div>
+<div class="table-scroll"><table class="data-table readable-fixes" id="fixes-table">
+    <thead><tr><th>发现的问题</th><th>准备怎么改</th><th>风险</th><th>页面</th><th>当前状态</th><th>操作</th></tr></thead>
+    <tbody id="fixes-tbody"><tr><td colspan="6" class="loading">正在加载...</td></tr></tbody>
+</table></div>
+<div class="pagination" id="fixes-pagination"></div>
+{% endblock %}
+{% block scripts %}<script>{% include "_fixes_script.html" %}</script>{% endblock %}

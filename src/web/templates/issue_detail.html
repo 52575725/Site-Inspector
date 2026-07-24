@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Issue #{{ issue.id }} — Site Inspector{% endblock %}
+{% block page_title %}Issue #{{ issue.id }}{% endblock %}
+
+{% block content %}
+{% if error %}
+<div class="error-banner">{{ error }}</div>
+{% else %}
+<div class="detail-grid">
+    <div class="detail-section">
+        <h2>Overview</h2>
+        <dl>
+            <dt>URL</dt>
+            <dd><a href="{{ issue.url }}" target="_blank">{{ issue.url }}</a></dd>
+            <dt>Inspector</dt>
+            <dd>{{ inspector_labels.get(issue.inspector, issue.inspector) }}</dd>
+            <dt>Category</dt>
+            <dd>{{ issue.category }}</dd>
+            <dt>Priority</dt>
+            <dd><span class="badge badge-{{ issue.priority_tier.lower() }}">{{ issue.priority_tier }}</span></dd>
+            <dt>Status</dt>
+            <dd><span class="status-badge status-{{ issue.status }}">{{ issue.status }}</span></dd>
+            <dt>First Seen</dt>
+            <dd>{{ issue.first_seen_at.strftime('%Y-%m-%d %H:%M') if issue.first_seen_at else '—' }}</dd>
+            <dt>Fix Applied</dt>
+            <dd>{{ issue.fix_applied_at.strftime('%Y-%m-%d %H:%M') if issue.fix_applied_at else '—' }}</dd>
+        </dl>
+    </div>
+
+    <div class="detail-section">
+        <h2>Details</h2>
+        <h3>{{ issue.title }}</h3>
+        {% if issue.description %}
+        <p class="issue-desc">{{ issue.description }}</p>
+        {% endif %}
+        {% if issue.element %}
+        <div class="code-block">
+            <strong>Element:</strong>
+            <pre>{{ issue.element }}</pre>
+        </div>
+        {% endif %}
+        {% if issue.current_value %}
+        <div class="code-block">
+            <strong>Current:</strong>
+            <pre>{{ issue.current_value }}</pre>
+        </div>
+        {% endif %}
+        {% if issue.suggested_value %}
+        <div class="code-block">
+            <strong>Suggested:</strong>
+            <pre>{{ issue.suggested_value }}</pre>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card">
+    <h2>Fixes ({{ fixes|length }})</h2>
+    {% if fixes %}
+    {% for fix in fixes %}
+    <div class="fix-entry">
+        <div class="fix-header">
+            <span class="badge badge-{{ fix.fix_type }}">{{ fix.fix_type }}</span>
+            <span>by <strong>{{ fix.fixer }}</strong></span>
+            <span>{{ fix.applied_at.strftime('%Y-%m-%d %H:%M') if fix.applied_at else '—' }}</span>
+            {% if fix.git_pr_url %}
+            <a href="{{ fix.git_pr_url }}" target="_blank" class="pr-link">PR &#8599;</a>
+            {% endif %}
+        </div>
+        {% if fix.diff %}
+        <pre class="diff-block">{{ fix.diff }}</pre>
+        {% endif %}
+        {% if fix.verifications %}
+        <div class="verifications">
+            <strong>Verifications:</strong>
+            <table class="mini-table">
+                <thead><tr><th>Metric</th><th>Before</th><th>After</th><th>Status</th></tr></thead>
+                <tbody>
+                {% for v in fix.verifications %}
+                <tr>
+                    <td>{{ v.metric_name }}</td>
+                    <td>{{ "%.1f"|format(v.value_before) }}</td>
+                    <td>{{ "%.1f"|format(v.value_after) if v.value_after else '—' }}</td>
+                    <td><span class="status-badge status-{{ v.status }}">{{ v.status }}</span></td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+    {% else %}
+    <p class="empty">No fixes applied yet.</p>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

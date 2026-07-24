@@ -1,0 +1,178 @@
+alt_text_generation:
+  system: |
+    You are an accessibility expert generating concise, descriptive alt text for images.
+    Rules:
+    - Maximum 125 characters
+    - Describe what the image SHOWS, do not start with "image of..."
+    - If the image contains text, transcribe it
+    - If decorative (spacer, divider), output "DECORATIVE"
+    - If you cannot determine content, output "IMAGE_NEEDS_MANUAL_REVIEW"
+    - Output language must match the page language: {language}
+    - Return ONLY valid JSON
+  prompt: |
+    Context: This is a {page_type} page on a B2B precious metals export website.
+    The image is located near the following text:
+    {surrounding_text}
+
+    Page URL: {url}
+    Image filename: {filename}
+
+    Analyze the surrounding context and suggest appropriate alt text.
+
+meta_description_generation:
+  system: |
+    You are an SEO expert writing meta descriptions for a B2B precious metals export company.
+    Rules:
+    - Exactly 120-160 characters
+    - Include primary keyword naturally
+    - Include a call-to-action
+    - Write in {language} language
+    - Return ONLY valid JSON: {{"description": "...", "keywords": ["..."]}}
+  prompt: |
+    Page title: {title}
+    Page content excerpt:
+    {content_excerpt}
+    Current description: {current_description}
+    URL: {url}
+
+    Write a compelling meta description.
+
+jsonld_generation:
+  system: |
+    You are a structured data expert. Generate JSON-LD for a B2B precious metals export website.
+    Rules:
+    - Use Schema.org types: Organization, Product, Article, BreadcrumbList, WebSite
+    - Include all available information from the page content
+    - If information is missing, omit the field rather than inventing it
+    - Return ONLY valid JSON-LD (no markdown wrapping, no explanation)
+  prompt: |
+    Page type: {page_type}
+    Page URL: {url}
+    Page content:
+    {content_excerpt}
+
+    Generate the appropriate JSON-LD structured data for this page.
+    Available entity types: Organization, Product, Article, BreadcrumbList, WebSite
+
+content_quality:
+  system: |
+    You are a content quality analyst reviewing a B2B website page.
+    Assess the content and return a structured analysis.
+    Rules:
+    - Evaluate clarity, professionalism, and completeness
+    - Check if content matches the page's apparent purpose
+    - Flag any factual inconsistencies within the content itself
+    - Language is {language}
+    - Return ONLY valid JSON
+  prompt: |
+    Page URL: {url}
+    Page title: {title}
+    Content word count: {word_count}
+    Content:
+    {content_excerpt}
+
+    Analyze content quality and return:
+    {{
+      "quality_score": 0.0-10.0,
+      "issues": ["..."],
+      "strengths": ["..."],
+      "is_thin_content": true/false,
+      "has_duplicate_risk": true/false,
+      "readability_assessment": "..."
+    }}
+
+htag_restructuring:
+  system: |
+    You are an HTML structure expert. Analyze the heading hierarchy and suggest improvements.
+    Rules:
+    - Every page must have exactly one H1
+    - Headings must not skip levels (H1→H3 is invalid)
+    - Headings should reflect content organization, not styling
+    - Return ONLY valid JSON
+  prompt: |
+    Current heading structure:
+    {heading_structure}
+
+    Page content sections:
+    {content_sections}
+
+    Suggest a corrected heading structure:
+    {{
+      "current_hierarchy": "H1 → H3 (skip H2)",
+      "suggested_hierarchy": "H1 → H2 → H3",
+      "changes": [
+        {{"type": "promote", "from": "H3", "to": "H2", "text": "...", "reason": "..."}}
+      ],
+      "requires_manual_review": false
+    }}
+
+content_generation:
+  system: |
+    You are a professional B2B content writer for a precious metals export company (Hong Kong Changjiang International Limited — helinsilver.com).
+    Write authoritative, well-researched content in clean HTML (no markdown wrapping).
+    Rules:
+    - Write in {language} language
+    - Target {word_count_target}+ words of body content
+    - Use <h2> and <h3> for section headings
+    - Use <p> for paragraphs, <ul>/<ol> for lists
+    - Include a <div class="highlight-box"> with key data point
+    - End with a <div class="cta-box"> call-to-action section
+    - Write with expertise, data references, and practical guidance
+    - Naturally incorporate target keywords: {target_keywords}
+    - Match the tone: professional B2B, authoritative, helpful
+    - Output ONLY the HTML body content (no <!DOCTYPE>, no <head>, no <nav>, no <footer>)
+    - Do not wrap in ```html``` or any markdown
+  prompt: |
+    Page type: {page_type}
+    Page URL: {url}
+    Page title: {title}
+    Target keywords: {target_keywords}
+    Existing headings on page: {existing_headings}
+    Current content word count: {current_word_count}
+    Language: {language}
+
+    Write a complete {word_count_target}+ word article body for this page.
+
+keyword_extraction:
+  system: |
+    You are an SEO keyword analyst. Extract target keywords from page content and metadata.
+    Rules:
+    - Identify 3-5 primary keywords the page should target
+    - Keywords should be specific, commercially relevant phrases
+    - Consider the page's purpose and audience intent
+    - Return ONLY valid JSON
+  prompt: |
+    Page URL: {url}
+    Page title: {title}
+    Page H1: {h1_text}
+    Meta description: {meta_description}
+    Content excerpt (first 500 words):
+    {content_excerpt}
+
+    Extract target keywords:
+    {{
+      "primary_keywords": ["keyword phrase 1", "keyword phrase 2", "keyword phrase 3"],
+      "secondary_keywords": ["phrase 4", "phrase 5"],
+      "search_intent": "informational|commercial|transactional|navigational",
+      "suggested_title": "SEO-optimized title with primary keyword",
+      "suggested_meta_description": "Compelling 120-160 char meta description"
+    }}
+
+translation:
+  system: |
+    You are a professional translator and localization specialist for a B2B precious metals export company.
+    Translate and localize content from {source_language} to {target_language}.
+    Rules:
+    - Preserve all HTML structure and class names
+    - Adapt idioms, units, and cultural references for the target market
+    - Maintain the professional B2B tone
+    - Keep all <a href> links intact
+    - Translate heading text, body text, and alt text
+    - Output the complete translated HTML (same structure, different text)
+  prompt: |
+    Source content ({source_language}):
+    {source_content}
+
+    Target language: {target_language}
+
+    Translate and localize the above content to {target_language}.

@@ -1,0 +1,424 @@
+{% extends "base.html" %}
+{% block title %}AI 文章生成器 — Site Inspector{% endblock %}
+{% block page_title %}AI 文章生成器{% endblock %}
+
+{% block content %}
+<div class="article-generator">
+    <!-- 生成表单 -->
+    <div class="card" id="gen-card">
+        <h2>生成新文章</h2>
+        <form id="gen-form" onsubmit="return false;">
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="gen-topic">文章主题 *</label>
+                    <input type="text" id="gen-topic" placeholder="例如：2024年白银市场走势分析" required>
+                </div>
+                <div class="form-group">
+                    <label for="gen-keywords">关键词（逗号分隔）</label>
+                    <input type="text" id="gen-keywords" placeholder="例如：白银, 贵金属, 市场分析">
+                </div>
+                <div class="form-group">
+                    <label for="gen-language">语言</label>
+                    <select id="gen-language">
+                        <option value="en">English</option>
+                        <option value="ja">日本語</option>
+                        <option value="zh">中文</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="gen-words">字数</label>
+                    <input type="number" id="gen-words" value="800" min="300" max="3000">
+                </div>
+                <div class="form-group">
+                    <label for="gen-type">文章类型</label>
+                    <select id="gen-type">
+                        <option value="blog">博客文章</option>
+                        <option value="market_analysis">市场分析</option>
+                        <option value="product_review">产品评测</option>
+                        <option value="guide">教程指南</option>
+                        <option value="news">新闻文章</option>
+                        <option value="landing">落地页</option>
+                    </select>
+                </div>
+            </div>
+            <button type="submit" id="gen-btn" class="btn btn-primary">开始生成</button>
+            <span id="gen-status" class="gen-status"></span>
+        </form>
+    </div>
+
+    <!-- 预览区 -->
+    <div class="card" id="preview-card" style="display:none;">
+        <div class="preview-header">
+            <h2>预览：<span id="preview-title"></span></h2>
+            <div class="preview-actions">
+                <button id="btn-original" class="btn btn-secondary" onclick="viewOriginal()" style="display:none;">查看原文</button>
+                <button id="btn-edit" class="btn btn-secondary" onclick="toggleEdit()">编辑 HTML</button>
+                <button id="btn-push" class="btn btn-primary" onclick="showPushForm()">推送到 GitHub</button>
+                <button id="btn-regen" class="btn btn-warning" onclick="regenerate()">重新生成</button>
+            </div>
+        </div>
+        <div id="preview-content" class="preview-content"></div>
+        <textarea id="edit-area" class="edit-area" style="display:none;"></textarea>
+    </div>
+
+    <!-- 推送表单 -->
+    <div class="card" id="push-card" style="display:none;">
+        <h2>推送到 GitHub</h2>
+        <p style="color:var(--text-muted);margin-bottom:12px;">将文章作为 HTML 文件提交到你的 GitHub 仓库，自动创建 Pull Request。</p>
+        <form id="push-form" onsubmit="return false;">
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="push-repo">GitHub 仓库地址 *</label>
+                    <input type="text" id="push-repo" placeholder="https://github.com/你的用户名/仓库名">
+                </div>
+                <div class="form-group">
+                    <label for="push-branch">分支</label>
+                    <input type="text" id="push-branch" value="main">
+                </div>
+                <div class="form-group">
+                    <label for="push-path">仓库中的文件路径</label>
+                    <input type="text" id="push-path" placeholder="blog/my-article/index.html">
+                </div>
+            </div>
+            <button type="submit" id="push-btn" class="btn btn-success">推送并创建 PR</button>
+            <span id="push-status"></span>
+        </form>
+    </div>
+
+    <!-- 翻译缺失文章 -->
+    <div class="card" id="translate-card">
+        <h2>🌐 翻译缺失的日文文章</h2>
+        <p style="color:var(--text-muted);margin-bottom:8px;">自动检测英文博客中有但日文博客中缺失的文章，AI 翻译后保存</p>
+        <div style="display:flex;gap:8px;align-items:center;">
+            <button id="check-missing-btn" class="btn btn-secondary" onclick="checkMissing()">检测缺失文章</button>
+            <button id="translate-all-btn" class="btn btn-primary" onclick="translateAll()" style="display:none;">一键翻译全部</button>
+            <span id="translate-status"></span>
+        </div>
+        <div id="missing-list" style="margin-top:12px;"></div>
+    </div>
+
+    <!-- 批量生成 -->
+    <div class="card" id="batch-card">
+        <h2>批量生成文章</h2>
+        <p style="color:var(--text-muted);margin-bottom:8px;">每行一个主题，AI 依次生成，完成后可在下方历史记录中预览和推送</p>
+        <form id="batch-form" onsubmit="return false;">
+            <textarea id="batch-topics" rows="6" placeholder="如何清洁白银饰品&#10;2026年白银投资指南&#10;白银与黄金的区别对比&#10;白银价格历史走势分析&#10;白银饰品的保养技巧" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:4px;font-size:.9rem;"></textarea>
+            <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+                <button type="submit" id="batch-btn" class="btn btn-primary">批量生成</button>
+                <span id="batch-status"></span>
+            </div>
+        </form>
+    </div>
+
+    <!-- 历史记录 -->
+    <div class="card" id="history-card">
+        <h2>历史文章</h2>
+        <div id="history-list">加载中...</div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+.form-group { display: flex; flex-direction: column; }
+.form-group label { font-size: .85rem; margin-bottom: 4px; color: var(--text-muted); }
+.form-group input, .form-group select { padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px; font-size: .9rem; }
+.gen-status { margin-left: 12px; font-size: .85rem; }
+.preview-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+.preview-content { border: 1px solid var(--border); border-radius: 4px; padding: 20px; max-height: 600px; overflow-y: auto; background: #fff; }
+.edit-area { width: 100%; min-height: 500px; font-family: monospace; font-size: .85rem; padding: 12px; border: 1px solid var(--border); border-radius: 4px; }
+.preview-actions { display: flex; gap: 8px; }
+.btn-success { background: #27ae60; color: #fff; }
+.btn-success:hover { background: #219a52; }
+.btn-warning { background: #f39c12; color: #fff; }
+.btn-warning:hover { background: #d68910; }
+.history-item { padding: 10px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+.history-item:hover { background: var(--hover-bg); }
+.history-item .badge { font-size: .75rem; padding: 2px 8px; border-radius: 10px; }
+.badge-pushed { background: #27ae60; color: #fff; }
+.badge-draft { background: #f39c12; color: #fff; }
+</style>
+<script>
+let currentArticle = null;
+
+document.getElementById('gen-form').addEventListener('submit', generateArticle);
+
+async function generateArticle() {
+    const btn = document.getElementById('gen-btn');
+    const status = document.getElementById('gen-status');
+    btn.disabled = true;
+    btn.textContent = '生成中...';
+    status.innerHTML = '<span class="spinner"></span> AI 正在撰写文章，请耐心等待...';
+
+    try {
+        const resp = await fetch('/api/articles/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                topic: document.getElementById('gen-topic').value.trim(),
+                keywords: document.getElementById('gen-keywords').value.trim(),
+                language: document.getElementById('gen-language').value,
+                word_count: parseInt(document.getElementById('gen-words').value) || 800,
+                page_type: document.getElementById('gen-type').value,
+            }),
+        });
+
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || `生成失败 (${resp.status})`);
+        }
+
+        currentArticle = await resp.json();
+        showPreview(currentArticle);
+        status.textContent = '生成完成！';
+        loadHistory();
+    } catch (err) {
+        status.innerHTML = `<span style="color:var(--bad)">${escapeHtml(err.message)}</span>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '开始生成';
+    }
+}
+
+function showPreview(article) {
+    currentArticle = article;
+    document.getElementById('preview-card').style.display = 'block';
+    document.getElementById('preview-title').textContent = article.title;
+    document.getElementById('preview-content').innerHTML = article.html;
+    document.getElementById('preview-content').style.display = 'block';
+    document.getElementById('edit-area').style.display = 'none';
+    document.getElementById('push-card').style.display = 'none';
+    // Show view-original button if translation has source_html
+    const origBtn = document.getElementById('btn-original');
+    if (article.source_html) {
+        origBtn.style.display = 'inline-block';
+        origBtn.textContent = '查看原文';
+        origBtn._showingOriginal = false;
+    } else {
+        origBtn.style.display = 'none';
+    }
+    window.scrollTo({ top: document.getElementById('preview-card').offsetTop - 20, behavior: 'smooth' });
+}
+
+function viewOriginal() {
+    const btn = document.getElementById('btn-original');
+    const preview = document.getElementById('preview-content');
+    if (!btn._showingOriginal) {
+        preview.innerHTML = currentArticle.source_html;
+        btn.textContent = '查看翻译';
+        btn._showingOriginal = true;
+    } else {
+        preview.innerHTML = currentArticle.html;
+        btn.textContent = '查看原文';
+        btn._showingOriginal = false;
+    }
+}
+
+function toggleEdit() {
+    const preview = document.getElementById('preview-content');
+    const editArea = document.getElementById('edit-area');
+    const btn = document.getElementById('btn-edit');
+
+    if (editArea.style.display === 'none') {
+        editArea.value = currentArticle.html;
+        preview.style.display = 'none';
+        editArea.style.display = 'block';
+        btn.textContent = '预览';
+    } else {
+        currentArticle.html = editArea.value;
+        preview.innerHTML = editArea.value;
+        preview.style.display = 'block';
+        editArea.style.display = 'none';
+        btn.textContent = '编辑 HTML';
+    }
+}
+
+function showPushForm() {
+    document.getElementById('push-card').style.display = 'block';
+    const slug = (currentArticle.title || 'article').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    document.getElementById('push-path').value = 'blog/' + slug + '/index.html';
+    document.getElementById('push-form').onsubmit = pushArticle;
+    window.scrollTo({ top: document.getElementById('push-card').offsetTop - 20, behavior: 'smooth' });
+}
+
+async function pushArticle() {
+    if (!currentArticle) return;
+    const btn = document.getElementById('push-btn');
+    const status = document.getElementById('push-status');
+    btn.disabled = true;
+    btn.textContent = '推送中...';
+    status.innerHTML = '<span class="spinner"></span> 正在推送到 GitHub...';
+
+    try {
+        const resp = await fetch(`/api/articles/${currentArticle.id}/push`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                repo_url: document.getElementById('push-repo').value.trim(),
+                branch: document.getElementById('push-branch').value.trim() || 'main',
+                file_path: document.getElementById('push-path').value.trim(),
+            }),
+        });
+
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || `推送失败 (${resp.status})`);
+        }
+
+        const data = await resp.json();
+        status.innerHTML = `<span style="color:var(--good)">&#9989; PR 已创建：<a href="${escapeHtml(data.pr_url)}" target="_blank">${escapeHtml(data.pr_url)}</a></span>`;
+        currentArticle.pushed = true;
+        currentArticle.pr_url = data.pr_url;
+        loadHistory();
+    } catch (err) {
+        status.innerHTML = `<span style="color:var(--bad)">${escapeHtml(err.message)}</span>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '推送并创建 PR';
+    }
+}
+
+function regenerate() {
+    document.getElementById('preview-card').style.display = 'none';
+    document.getElementById('push-card').style.display = 'none';
+    currentArticle = null;
+    generateArticle();
+}
+
+async function loadHistory() {
+    try {
+        const resp = await fetch('/api/articles');
+        const articles = await resp.json();
+        const container = document.getElementById('history-list');
+
+        if (!articles || !articles.length) {
+            container.innerHTML = '<p class="empty">还没有生成过文章。</p>';
+            return;
+        }
+
+        container.innerHTML = articles.map(a => `
+            <div class="history-item" onclick="loadArticle('${a.id}')">
+                <div>
+                    <strong>${escapeHtml(a.title || a.topic)}</strong>
+                    <div style="font-size:.8rem;color:var(--text-muted)">${new Date(a.created_at).toLocaleString('zh-CN')}</div>
+                </div>
+                <span class="badge ${a.pushed ? 'badge-pushed' : 'badge-draft'}">${a.pushed ? '已推送' : '草稿'}</span>
+            </div>
+        `).join('');
+    } catch (err) {
+        document.getElementById('history-list').textContent = '加载失败';
+    }
+}
+
+async function loadArticle(id) {
+    try {
+        const resp = await fetch(`/api/articles/${id}`);
+        if (!resp.ok) throw new Error('未找到');
+        currentArticle = await resp.json();
+        showPreview(currentArticle);
+    } catch (err) {
+        alert('加载文章失败：' + err.message);
+    }
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+// ── Missing Translation Detection ──────────────────────────────────
+let missingArticles = [];
+
+async function checkMissing() {
+    const status = document.getElementById('translate-status');
+    const list = document.getElementById('missing-list');
+    status.innerHTML = '<span class=\"spinner\"></span> 检测中...';
+    list.innerHTML = '';
+    document.getElementById('translate-all-btn').style.display = 'none';
+    try {
+        const resp = await fetch('/api/articles/translate-missing');
+        const data = await resp.json();
+        missingArticles = data.missing || [];
+        status.innerHTML = '';
+        if (!missingArticles || !missingArticles.length) {
+            list.innerHTML = '<p style=\"color:var(--good);\">✅ 所有文章都已翻译！</p>';
+            return;
+        }
+        list.innerHTML = '<p>发现 <strong>' + missingArticles.length + '</strong> 篇缺失的日文文章：</p>' +
+            missingArticles.map(a => '<div style=\"padding:4px 0;border-bottom:1px solid var(--border);\">' +
+                '🇬🇧 ' + a.en_path + '<br>→ 🇯🇵 ' + a.jp_path + '</div>').join('');
+        document.getElementById('translate-all-btn').style.display = 'inline-block';
+    } catch (err) {
+        status.innerHTML = '<span style=\"color:var(--bad);\">' + escapeHtml(err.message) + '</span>';
+    }
+}
+
+async function translateAll() {
+    if (!missingArticles || !missingArticles.length) {
+        document.getElementById('translate-status').textContent = '请先点击"检测缺失文章"';
+        return;
+    }
+    const btn = document.getElementById('translate-all-btn');
+    const status = document.getElementById('translate-status');
+    btn.disabled = true;
+    let done = 0;
+    for (const article of missingArticles) {
+        btn.textContent = '翻译中 (' + (done + 1) + '/' + missingArticles.length + ')...';
+        status.innerHTML = '<span class=\"spinner\"></span> 正在翻译: ' + article.en_path;
+        try {
+            const resp = await fetch('/api/articles/translate', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    source_path: article.en_path,
+                    target_path: article.jp_path,
+                    source_lang: 'en', target_lang: 'ja',
+                }),
+            });
+            if (resp.ok) {
+                const data = await resp.json();
+                done++;
+                status.innerHTML = '<span style=\"color:var(--good);\">✅ ' + done + '/' + missingArticles.length + ' 完成: ' + data.title + '</span>';
+            } else {
+                const err = await resp.json().catch(() => ({}));
+                status.innerHTML = '<span style=\"color:var(--bad);\">❌ ' + article.en_path + ': ' + (err.detail || 'failed') + '</span>';
+            }
+        } catch (err) {
+            status.innerHTML = '<span style=\"color:var(--bad);\">' + escapeHtml(err.message) + '</span>';
+        }
+    }
+    btn.textContent = '一键翻译全部';
+    btn.disabled = false;
+    loadHistory();
+    status.innerHTML = '<span style=\"color:var(--good);\">✅ 全部完成！' + done + '/' + missingArticles.length + ' 篇已翻译，在历史记录中查看和推送</span>';
+}
+
+// Batch generation
+document.getElementById('batch-form').addEventListener('submit', async () => {
+    const topics = document.getElementById('batch-topics').value.split('\n').filter(t => t.trim());
+    if (!topics.length) return;
+    const btn = document.getElementById('batch-btn');
+    const status = document.getElementById('batch-status');
+    btn.disabled = true; btn.textContent = '生成中...';
+    status.innerHTML = '<span class=\"spinner\"></span> 正在生成 ' + topics.length + ' 篇文章...';
+    try {
+        const resp = await fetch('/api/articles/batch-generate', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                topics, keywords: document.getElementById('gen-keywords').value.trim(),
+                language: document.getElementById('gen-language').value,
+                word_count: parseInt(document.getElementById('gen-words').value) || 800,
+                page_type: document.getElementById('gen-type').value,
+            }),
+        });
+        const data = await resp.json();
+        status.innerHTML = '<span style=\"color:var(--good)\">' + data.generated + '/' + topics.length + ' 篇生成成功！</span>';
+    } catch (err) {
+        status.innerHTML = '<span style=\"color:var(--bad)\">失败: ' + escapeHtml(err.message) + '</span>';
+    } finally { btn.disabled = false; btn.textContent = '批量生成'; loadHistory(); }
+});
+
+loadHistory();
+</script>
+{% endblock %}

@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Scans — Site Inspector{% endblock %}
+{% block page_title %}Scans{% endblock %}
+
+{% block content %}
+<div class="action-bar">
+    <button id="trigger-scan" class="btn btn-primary" onclick="triggerNewScan()">
+        &#9654; Trigger New Scan
+    </button>
+    <span id="scan-status" class="scan-status"></span>
+</div>
+
+<table class="data-table" id="scans-table">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Type</th>
+            <th>Status</th>
+            <th>Started</th>
+            <th>Completed</th>
+            <th>Pages</th>
+            <th>Issues</th>
+        </tr>
+    </thead>
+    <tbody id="scans-tbody">
+        <tr><td colspan="7" class="loading">Loading...</td></tr>
+    </tbody>
+</table>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadScans() {
+    const resp = await fetch('/api/scans');
+    const scans = await resp.json();
+    const tbody = document.getElementById('scans-tbody');
+    tbody.innerHTML = scans.map(s => `
+        <tr>
+            <td>${s.id}</td>
+            <td><span class="badge badge-${s.scan_type}">${s.scan_type}</span></td>
+            <td><span class="status-badge status-${s.status}">${s.status}</span></td>
+            <td>${s.started_at ? new Date(s.started_at).toLocaleString() : '—'}</td>
+            <td>${s.completed_at ? new Date(s.completed_at).toLocaleString() : '—'}</td>
+            <td>${s.pages_crawled || 0}</td>
+            <td>${s.total_issues_found || 0}</td>
+        </tr>
+    `).join('');
+}
+
+async function triggerNewScan() {
+    const btn = document.getElementById('trigger-scan');
+    const status = document.getElementById('scan-status');
+    btn.disabled = true;
+    status.textContent = 'Starting scan...';
+    try {
+        const resp = await fetch('/api/scan/trigger', { method: 'POST' });
+        const data = await resp.json();
+        status.textContent = data.message;
+        setTimeout(loadScans, 3000);
+    } catch (e) {
+        status.textContent = 'Failed to start scan';
+    }
+    btn.disabled = false;
+}
+
+loadScans();
+</script>
+{% endblock %}

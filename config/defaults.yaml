@@ -1,0 +1,50 @@
+# Global default configuration
+ollama:
+  base_url: "http://localhost:11434"
+  model: "llama3.2"
+  embed_model: "nomic-embed-text"
+  timeout: 120
+
+crawling:
+  rate: 0.5
+  max_concurrent: 3
+  timeout_seconds: 30
+  max_retries: 3
+  max_pages: 200
+  user_agent: "SiteInspector/1.0 (+https://site-inspector.local)"
+
+lighthouse:
+  path: "lighthouse"
+  flags: "--chrome-flags='--headless --no-sandbox'"
+
+priority_weights:
+  impact_scope: 0.40
+  severity: 0.35
+  fix_roi: 0.25
+
+auto_fix:
+  sandbox_diff_threshold_auto: 0.05
+  sandbox_diff_threshold_review: 0.15
+  max_auto_fixes_per_scan: 50
+
+web:
+  max_active_scans: 1
+
+verification:
+  observation_days: 14
+  checkpoints: [3, 7, 14]
+  degradation_threshold: 0.10
+
+git:
+  author_name: "Site Inspector Bot"
+  author_email: "bot@site-inspector.local"
+  platform: "github"
+  auto_merge: false
+
+report:
+  smtp_port: 587
+
+scheduler:
+  daily_scan_time: "02:00"
+  weekly_report_day: "mon"
+  weekly_report_time: "08:00"

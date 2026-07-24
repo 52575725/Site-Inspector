@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}修复建议 | Site Inspector{% endblock %}
+{% block page_title %}修复建议{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/fix-review.css">{% endblock %}
+{% block content %}
+{% if error %}<div class="error-banner">{{ error }}</div>{% else %}
+<div class="fix-preview">
+    <div class="fix-preview-header">
+        <div><h2>{{ preview.problem }}</h2><a href="{{ preview.page_url }}" target="_blank" rel="noopener">查看受影响页面</a></div>
+        <div class="fix-badges">
+            <span class="risk-badge risk-{{ preview.risk }}">{{ {'low': '低风险', 'medium': '中风险', 'high': '高风险'}.get(preview.risk, '中风险') }}</span>
+            <span id="fix-status" class="status-badge status-{{ preview.status }}">{{ preview.status_label }}</span>
+        </div>
+    </div>
+    {% if preview.warning %}<div class="change-warning">{{ preview.warning }}</div>{% endif %}
+    <section class="plain-section"><h3>可能造成什么影响</h3><p>{{ preview.impact }}</p></section>
+    <section class="plain-section"><h3>Agent 准备怎么改</h3><p>{{ preview.action }}</p><p class="expected-outcome">预期效果：{{ preview.outcome }}</p></section>
+    <div class="before-after-grid">
+        <section><h3>修改前</h3><pre>{{ preview.before }}</pre></section>
+        <section><h3>修改后</h3><pre>{{ preview.after }}</pre></section>
+    </div>
+    <div id="fix-actions" class="fix-actions" data-fix-id="{{ fix.id }}" data-status="{{ preview.status }}"></div>
+    <details class="developer-details">
+        <summary>开发者信息</summary>
+        <dl><dt>文件</dt><dd>{{ preview.file_path or '未映射到文件' }}</dd><dt>修复器</dt><dd>{{ fix.fixer }}</dd><dt>类型</dt><dd>{{ fix.fix_type }}</dd></dl>
+        {% if preview.diff %}<pre class="diff-block">{{ preview.diff }}</pre>{% endif %}
+        {% if preview.diff_truncated %}<p>代码差异过长，页面只显示前 20,000 个字符。</p>{% endif %}
+        {% if preview.git_pr_url %}<a href="{{ preview.git_pr_url }}" target="_blank" rel="noopener">查看 PR</a>{% endif %}
+    </details>
+</div>
+{% endif %}
+{% endblock %}
+{% block scripts %}{% if not error %}<script src="/static/js/fix-detail.js"></script>{% endif %}{% endblock %}

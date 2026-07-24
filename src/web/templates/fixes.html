@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Fixes — Site Inspector{% endblock %}
+{% block page_title %}Fixes{% endblock %}
+
+{% block content %}
+<div class="filter-bar">
+    <select id="filter-fix-type" class="filter-select">
+        <option value="">All Types</option>
+        <option value="html">HTML</option>
+        <option value="meta">Meta</option>
+        <option value="sitemap">Sitemap</option>
+        <option value="robots">Robots</option>
+        <option value="breadcrumb">Breadcrumb</option>
+        <option value="heading">Heading</option>
+        <option value="link">Link</option>
+    </select>
+    <button id="filter-apply" class="btn btn-primary">Filter</button>
+</div>
+
+<table class="data-table" id="fixes-table">
+    <thead>
+        <tr>
+            <th>Issue</th>
+            <th>Fixer</th>
+            <th>Type</th>
+            <th>File</th>
+            <th>Applied</th>
+            <th>PR</th>
+            <th>Verification</th>
+        </tr>
+    </thead>
+    <tbody id="fixes-tbody">
+        <tr><td colspan="7" class="loading">Loading...</td></tr>
+    </tbody>
+</table>
+
+<div class="pagination" id="fixes-pagination"></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/fixes.js"></script>
+{% endblock %}

@@ -1,0 +1,51 @@
+targets:
+  helinsilver:
+    name: "helinsilver"
+    base_url: "https://www.helinsilver.com"
+    languages: ["en", "jp"]
+    language_paths:
+      en: "/"
+      jp: "/jp/"
+    source:
+      type: "local"
+      local_path: "data/site_sources/helinsilver"
+    sitemap_url: "https://www.helinsilver.com/sitemap.xml"
+    excluded_patterns: []
+    default_og_image: "https://www.helinsilver.com/images/silver-ingots.jpg"
+    default_og_image_width: 1200
+    default_og_image_height: 630
+    organization:
+      name: "Hong Kong Changjiang International Limited"
+      alternate_name: "Helin Silver"
+      address:
+        street_address: "Unit 1618B, 16/F Pioneer Centre, 750 Nathan Road"
+        locality: "Mong Kok"
+        region: "Kowloon"
+        country: "HK"
+    verification:
+      google: "aUKdh1R7SET0we93M9zOhh2f4srk0E14mWuf4z-tQGM"
+      baidu: "codeva-wjmEvlNTcJ"
+      bing: "F3B0CBD6AC9BC7F82E8DCC05E28E4CD3"
+    geo:
+      latitude: 22.3193
+      longitude: 114.1694
+      region: "HK"
+      placename: "Mong Kok, Kowloon, Hong Kong"
+    slug_translations:
+      ja:
+        home: "ホーム"
+        products: "製品"
+        about: "会社概要"
+        blog: "市場情報"
+        contact: "お問い合わせ"
+    language_pairs:
+      - en: "/"
+        jp: "/jp/"
+      - en: "/products/"
+        jp: "/jp/products/"
+      - en: "/about/"
+        jp: "/jp/about/"
+      - en: "/contact/"
+        jp: "/jp/contact/"
+      - en: "/blog/"
+        jp: "/jp/blog/"

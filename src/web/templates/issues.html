@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Issues — Site Inspector{% endblock %}
+{% block page_title %}Issues{% endblock %}
+
+{% block content %}
+<div class="filter-bar">
+    <select id="filter-inspector" class="filter-select">
+        <option value="">All Inspectors</option>
+        {% for key, label in inspector_labels.items() %}
+        <option value="{{ key }}">{{ label }}</option>
+        {% endfor %}
+    </select>
+    <select id="filter-priority" class="filter-select">
+        <option value="">All Priorities</option>
+        <option value="P0">P0 — Critical</option>
+        <option value="P1">P1 — High</option>
+        <option value="P2">P2 — Medium</option>
+        <option value="P3">P3 — Low</option>
+    </select>
+    <select id="filter-status" class="filter-select">
+        <option value="">All Statuses</option>
+        <option value="open">Open</option>
+        <option value="fixed">Fixed</option>
+        <option value="false_positive">False Positive</option>
+        <option value="wont_fix">Won't Fix</option>
+    </select>
+    <button id="filter-apply" class="btn btn-primary">Filter</button>
+</div>
+
+<table class="data-table" id="issues-table">
+    <thead>
+        <tr>
+            <th>URL</th>
+            <th>Inspector</th>
+            <th>Category</th>
+            <th>Priority</th>
+            <th>Score</th>
+            <th>Status</th>
+            <th>Fixes</th>
+        </tr>
+    </thead>
+    <tbody id="issues-tbody">
+        <tr><td colspan="7" class="loading">Loading...</td></tr>
+    </tbody>
+</table>
+
+<div class="pagination" id="issues-pagination"></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/issues.js"></script>
+{% endblock %}

@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}工具 — Site Inspector{% endblock %}
+{% block page_title %}工具箱{% endblock %}
+
+{% block content %}
+<!-- 竞品监控 -->
+<div class="card">
+    <h2>🔍 竞品监控</h2>
+    <p style="color:var(--text-muted);margin-bottom:12px;">输入竞品 URL，系统会抓取标题/H1/描述/字数，和上次快照对比找出变化</p>
+    <form id="competitor-form" onsubmit="return false;">
+        <textarea id="competitor-urls" rows="3" placeholder="每行一个 URL&#10;https://competitor1.com/&#10;https://competitor2.com/" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;"></textarea>
+        <button type="submit" class="btn btn-primary" style="margin-top:8px;">立即快照</button>
+        <span id="competitor-status" style="margin-left:8px;"></span>
+    </form>
+    <div id="competitor-results" style="margin-top:12px;"></div>
+</div>
+
+<!-- 图片优化 -->
+<div class="card">
+    <h2>🖼️ 图片 WebP 转换</h2>
+    <p style="color:var(--text-muted);margin-bottom:12px;">将目录下的 PNG/JPG 图片批量转为 WebP 格式（体积减小 50-80%，Google 推荐）</p>
+    <form id="webp-form" onsubmit="return false;">
+        <input type="text" id="webp-dir" placeholder="图片目录路径，如 data/site_sources/helinsilver/images" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;">
+        <button type="submit" class="btn btn-primary" style="margin-top:8px;">批量转换</button>
+        <span id="webp-status" style="margin-left:8px;"></span>
+    </form>
+</div>
+
+<!-- GSC -->
+<div class="card">
+    <h2>📊 Google Search Console</h2>
+    <p style="color:var(--text-muted);margin-bottom:12px;">查看最近的搜索分析数据（需配置 GSC 凭证）</p>
+    <button id="gsc-btn" class="btn btn-primary" onclick="fetchGSC()">获取 GSC 数据</button>
+    <div id="gsc-results" style="margin-top:12px;"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Competitor
+document.getElementById('competitor-form').addEventListener('submit', async () => {
+    const urls = document.getElementById('competitor-urls').value.split('\n').filter(u => u.trim());
+    if (!urls.length) return;
+    const status = document.getElementById('competitor-status');
+    status.innerHTML = '<span class="spinner"></span> 快照中...';
+    const resp = await fetch('/api/tools/competitor/snapshot', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({urls}),
+    });
+    const data = await resp.json();
+    status.textContent = '完成！';
+    document.getElementById('competitor-results').innerHTML = data.results.map(r => {
+        if (r.error) return '<div class="card" style="padding:10px;margin:4px 0;">' + r.url + ': ' + r.error + '</div>';
+        const changes = r.changes || [];
+        return '<div class="card" style="padding:10px;margin:4px 0;">' +
+            '<strong>' + r.url + '</strong><br>' +
+            '标题: ' + (r.title || '(无)').substring(0, 80) + '<br>' +
+            '字数: ' + (r.word_count || 0) +
+            (changes.length ? '<br><span style="color:#f39c12;">⚠ ' + changes.length + ' 处变化: ' + changes.map(c => c.field).join(', ') + '</span>' : '<br><span style="color:var(--good);">无变化</span>') +
+            '</div>';
+    }).join('');
+});
+
+// WebP
+document.getElementById('webp-form').addEventListener('submit', async () => {
+    const dir = document.getElementById('webp-dir').value.trim();
+    if (!dir) return;
+    const status = document.getElementById('webp-status');
+    status.innerHTML = '<span class="spinner"></span> 转换中...';
+    const resp = await fetch('/api/tools/convert-webp', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({directory: dir}),
+    });
+    const data = await resp.json();
+    status.innerHTML = '✅ 转换 ' + (data.converted || 0) + ' 张，节省 ' + (data.saved_kb || 0) + ' KB，跳过 ' + (data.skipped || 0) + ' 张';
+});
+
+// GSC
+async function fetchGSC() {
+    document.getElementById('gsc-results').innerHTML = '<span class="spinner"></span> 加载中...';
+    const resp = await fetch('/api/tools/gsc/summary');
+    const data = await resp.json();
+    if (!data.available) {
+        document.getElementById('gsc-results').innerHTML = '<p>' + data.message + '</p>';
+    } else if (data.error) {
+        document.getElementById('gsc-results').innerHTML = '<p style="color:var(--bad);">Error: ' + data.error + '</p>';
+    } else {
+        document.getElementById('gsc-results').innerHTML = '<pre style="font-size:.8rem;">' + JSON.stringify(data.data, null, 2) + '</pre>';
+    }
+}
+</script>
+{% endblock %}
