@@ -247,14 +247,20 @@ class CompetitorGapInspector(BaseInspector):
 
     async def _auto_discover(self) -> None:
         """Auto-discover competitors when none are manually configured."""
+        from urllib.parse import urlparse
         from src.inspectors.competitor_discovery import (
             discover_competitors, extract_keywords_from_pages,
         )
-        # Extract keywords from crawled page data
         page_data = self._page_data if self._page_data else []
+
+        # Extract domain from the first page's URL
+        your_domain = "example.com"
+        if page_data and page_data[0].get("url"):
+            your_domain = urlparse(page_data[0]["url"]).netloc.lower().replace("www.", "")
+
         keywords = extract_keywords_from_pages(
             pages=page_data,
-            your_domain="helinsilver.com",
+            your_domain=your_domain,
         )
         if not keywords:
             logger.info("No keywords extracted, skipping competitor auto-discovery")
@@ -262,7 +268,7 @@ class CompetitorGapInspector(BaseInspector):
 
         discovered = await discover_competitors(
             keywords=keywords,
-            your_domain="helinsilver.com",
+            your_domain=your_domain,
             max_competitors=5,
         )
         if discovered:

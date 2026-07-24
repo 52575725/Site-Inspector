@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-DUCKDUCKGO_LITE = "https://lite.duckduckgo.com/lite/"
+DUCKDUCKGO_HTML = "https://html.duckduckgo.com/html/"
 
 
 async def discover_competitors(
@@ -51,23 +51,17 @@ async def discover_competitors(
         for keyword in keywords[:10]:  # limit to avoid rate-limiting
             try:
                 resp = await client.post(
-                    DUCKDUCKGO_LITE,
+                    DUCKDUCKGO_HTML,
                     data={"q": keyword},
                 )
                 resp.raise_for_status()
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                # Extract result links (DuckDuckGo Lite uses a simple table layout)
-                for link in soup.find_all("a", href=True):
+                # Extract result links (DuckDuckGo HTML uses class='result__a')
+                for link in soup.find_all("a", class_="result__a", href=True):
                     href = link["href"]
-                    # DuckDuckGo Lite wraps real URLs in redirects like
-                    # //duckduckgo.com/l/?uddg=https://example.com/...
-                    if "uddg=" in href:
-                        import urllib.parse
-                        parsed = urllib.parse.urlparse(href)
-                        qs = urllib.parse.parse_qs(parsed.query)
-                        real_url = qs.get("uddg", [href])[0]
-                    elif href.startswith("http"):
+                    # The HTML endpoint returns direct URLs (not redirects)
+                    if href.startswith("http"):
                         real_url = href
                     else:
                         continue
@@ -125,11 +119,32 @@ def extract_keywords_from_pages(
     Returns:
         List of search query strings
     """
+    # Brand-specific words to exclude from competitor search queries
+    brand_words = {
+        "helin", "helinsilver", "changjiang", "helinsilvercom",
+    }
+    # Generic stopwords
     stopwords = {
         "the", "a", "an", "and", "or", "but", "in", "on", "at", "to",
         "for", "of", "with", "by", "from", "is", "are", "was", "were",
-        "silver", "hong", "kong", "international", "limited", "co", "ltd",
+        "limited", "co", "ltd", "hong", "kong", "international",
+        "this", "that", "these", "those", "has", "have", "its",
     }
+
+    # Dynamically extract brand words from the site's own domain.
+    # Only domain name parts are unambiguous brand identifiers.
+    # Title/site-name words may also be topic keywords (e.g., "Silver" in
+    # "Helin Silver" is both a brand component and a topic).
+    brand_words: set[str] = set()
+    for page in pages:
+        url = page.get("url", "")
+        if not url:
+            continue
+        from urllib.parse import urlparse
+        domain_name = urlparse(url).netloc.lower().replace("www.", "").split(".")[0]
+        # Use only the full domain name as a brand token.
+        # Do NOT split into substrings — "silver" in "helinsilver" is a topic word.
+        brand_words.add(domain_name)
 
     # Extract n-grams from page titles
     word_counter: Counter[str] = Counter()
@@ -137,9 +152,8 @@ def extract_keywords_from_pages(
         title = page.get("title", "")
         h1 = page.get("h1", "")
         combined = f"{title} {h1}".lower()
-        # Extract meaningful words (4+ chars)
         words = re.findall(r"[a-z]{4,}", combined)
-        significant = [w for w in words if w not in stopwords]
+        significant = [w for w in words if w not in stopwords and w not in brand_words]
         # Single keywords
         for w in significant:
             word_counter[w] += 1
@@ -147,19 +161,23 @@ def extract_keywords_from_pages(
         for i in range(len(significant) - 1):
             word_counter[f"{significant[i]} {significant[i+1]}"] += 1
 
-    # Build search queries from top keywords
+    # Build search queries from top keywords, filtering out brand-specific ones
     top_words = [w for w, _ in word_counter.most_common(12) if " " not in w]
     top_phrases = [w for w, _ in word_counter.most_common(8) if " " in w]
 
     queries: list[str] = []
 
-    # Add phrase queries (most specific, best for finding competitors)
-    for phrase in top_phrases[:4]:
-        queries.append(phrase)
+    # Filter: keep only phrases that don't contain brand words
+    for phrase in top_phrases:
+        if not any(bw in phrase for bw in brand_words):
+            queries.append(phrase)
 
-    # Build compound queries from top single words
-    for i in range(0, len(top_words) - 1, 2):
-        queries.append(f"{top_words[i]} {top_words[i+1]}")
+    # Build compound queries from top non-brand single words
+    topic_words = [w for w in top_words if w not in brand_words]
+    for i in range(0, len(topic_words) - 1, 2):
+        q = f"{topic_words[i]} {topic_words[i+1]}"
+        if not any(bw in q for bw in brand_words):
+            queries.append(q)
 
     # Add GSC queries if available
     if gsc_queries:

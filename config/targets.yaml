@@ -49,7 +49,5 @@ targets:
         jp: "/jp/contact/"
       - en: "/blog/"
         jp: "/jp/blog/"
-    competitors:
-      - https://www.silverinstitute.org/silver-price
-      - https://www.bullionvault.com/gold-news/silver
+    competitors: []
       - https://www.kitco.com/silver-price-today
