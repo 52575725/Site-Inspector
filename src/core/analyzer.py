@@ -122,6 +122,7 @@ class Analyzer:
         "image_not_webp": 0.35,
         "image_no_async_decoding": 0.25,
         "large_images": 0.55,  # oversized images hurt LCP
+        "competitor_page_changed": 0.80,  # competitor made SEO moves
         # Geo tags
         "missing_geo_region": 0.45,
         "missing_geo_placename": 0.40,

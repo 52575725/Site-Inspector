@@ -68,6 +68,31 @@ class CompetitorGapInspector(BaseInspector):
         if not self._competitor_profiles:
             return findings
 
+        # ── Report competitor changes on homepage ────────────────
+        # Only emit once per scan — use the first (homepage) URL
+        is_homepage = url.rstrip("/").split("/")[-1] in ("", "jp", "index.html")
+        if is_homepage:
+            for comp_url, profile in self._competitor_profiles.items():
+                recent = profile.get("_recent_changes")
+                if recent:
+                    findings.append(RawFinding(
+                        url=url, inspector=self.inspector_name,
+                        category="competitor_page_changed",
+                        description=(
+                            f"Competitor {urlparse(comp_url).netloc} has changed: "
+                            f"{'; '.join(recent)}"
+                        ),
+                        current_value=f"Changes detected on {urlparse(comp_url).netloc}",
+                        suggested_value=(
+                            "Review competitor changes and adjust your content "
+                            "strategy if needed."
+                        ),
+                        raw_metadata={
+                            "competitor_url": comp_url,
+                            "changes": recent,
+                        },
+                    ))
+
         your_soup = BeautifulSoup(html_content, "html.parser")
         your = self._extract_profile(url, your_soup)
 
@@ -206,7 +231,23 @@ class CompetitorGapInspector(BaseInspector):
     # ── Fetch + Profile ──────────────────────────────────────────────
 
     async def _fetch_all_competitors(self) -> None:
-        """Fetch and profile all competitor URLs once per scan."""
+        """Fetch, profile, and snapshot all competitor URLs once per scan.
+
+        Also saves snapshots for change tracking — so you know when a
+        competitor updates their title, meta description, or content.
+        """
+        from src.inspectors.competitor import CompetitorTracker
+        tracker = CompetitorTracker(timeout=self.timeout)
+        # Snapshot before fetching to detect changes
+        snapshots_before: dict[str, dict] = {}
+        for url in self.competitor_urls:
+            try:
+                history = tracker.get_history(url, limit=1)
+                if history:
+                    snapshots_before[url] = history[0]
+            except Exception:
+                pass
+
         async with httpx.AsyncClient(
             timeout=self.timeout, follow_redirects=True,
             headers={"User-Agent": "SiteInspector/1.0"},
@@ -216,12 +257,36 @@ class CompetitorGapInspector(BaseInspector):
                     resp = await client.get(url)
                     resp.raise_for_status()
                     soup = BeautifulSoup(resp.text, "html.parser")
-                    self._competitor_profiles[url] = self._extract_profile(url, soup)
+                    profile = self._extract_profile(url, soup)
+                    self._competitor_profiles[url] = profile
                     logger.info(
                         f"Competitor profiled: {urlparse(url).netloc} "
-                        f"({self._competitor_profiles[url]['word_count']} words, "
-                        f"{len(self._competitor_profiles[url].get('h2_topics', []))} H2s)"
+                        f"({profile['word_count']} words, "
+                        f"{len(profile.get('h2_topics', []))} H2s)"
                     )
+
+                    # ── Snapshot + change detection ──────────────
+                    snapshot = await tracker.snapshot(url)
+                    prev = snapshots_before.get(url)
+                    if prev and snapshot.get("changes"):
+                        changes = snapshot["changes"]
+                        change_descs = []
+                        for ch in changes:
+                            field = ch["field"]
+                            before = str(ch.get("before", ""))[:60]
+                            after = str(ch.get("after", ""))[:60]
+                            if before or after:
+                                change_descs.append(
+                                    f"{field}: '{before}' → '{after}'"
+                                )
+                        if change_descs:
+                            logger.info(
+                                f"Competitor changed: {urlparse(url).netloc} — "
+                                f"{'; '.join(change_descs)}"
+                            )
+                            # Attach changes to profile for reporting
+                            self._competitor_profiles[url]["_recent_changes"] = change_descs
+
                 except Exception as e:
                     logger.warning(f"Competitor fetch failed {url}: {e}")
 
