@@ -124,9 +124,14 @@ async def translate_article(request: Request, body: TranslateRequest):
 
     source_html = source_file.read_text(encoding="utf-8")
 
-    lang_names = {"en": "English", "ja": "Japanese", "zh": "Chinese"}
-    src_name = lang_names.get(body.source_lang, body.source_lang)
-    tgt_name = lang_names.get(body.target_lang, body.target_lang)
+    lang_names = {
+        "en": "English", "ja": "Japanese", "zh": "Chinese",
+        "ko": "Korean", "fr": "French", "de": "German",
+        "es": "Spanish", "pt": "Portuguese", "ru": "Russian",
+        "ar": "Arabic", "vi": "Vietnamese", "th": "Thai",
+    }
+    src_name = lang_names.get(body.source_lang, body.source_lang.upper())
+    tgt_name = lang_names.get(body.target_lang, body.target_lang.upper())
 
     prompt = f"""Translate EVERY part of the following HTML article from {src_name} to {tgt_name}.
 You MUST translate ALL sections, paragraphs, headings, lists, and table content.
@@ -191,32 +196,143 @@ HTML to translate (FULL — do not skip any part):
 
 @router.get("/api/articles/translate-missing")
 async def find_missing_translations(request: Request):
-    """Find blog articles that exist in EN but are missing in JP."""
+    """Find articles that exist in one language but are missing in others.
+
+    Reads target config's language_paths to auto-detect which languages
+    are configured and which pages are missing translations.
+    Works with any language pair — not hardcoded to EN/JP.
+    """
     from pathlib import Path
+    from bs4 import BeautifulSoup
+    import re
+
     settings = request.app.state.settings
     base = Path("data/site_sources") / settings.target_name
 
-    missing = []
-    en_blog = base / "blog"
-    if en_blog.exists():
-        # Only check known article files, not entire directory tree
-        for f in en_blog.iterdir():
-            if f.name == "index.html":
-                continue
-            if f.is_file() and f.suffix == ".html":
-                rel = str(f.relative_to(base))
-                jp_rel = "jp/" + rel
-                if not (base / jp_rel).exists():
-                    missing.append({"en_path": rel, "jp_path": jp_rel})
-            elif f.is_dir():
-                idx = f / "index.html"
-                if idx.exists():
-                    rel = str(idx.relative_to(base))
-                    jp_rel = "jp/" + rel
-                    if not (base / jp_rel).exists():
-                        missing.append({"en_path": rel, "jp_path": jp_rel})
+    if not base.exists():
+        return {"missing": [], "count": 0, "message": "Site source directory not found"}
 
-    return {"missing": sorted(missing, key=lambda x: x["en_path"]), "count": len(missing)}
+    # Read language config from target
+    target_config = settings.__class__.load_target(settings.target_name)
+    lang_paths: dict[str, str] = target_config.get("language_paths", {"en": "/"})
+    lang_pairs: list[dict] = target_config.get("language_pairs", [])
+
+    if len(lang_paths) <= 1:
+        return {"missing": [], "count": 0, "message": "Only one language configured; nothing to translate"}
+
+    # Map: language code → path prefix (e.g., "ja" → "jp")
+    lang_prefix: dict[str, str] = {}
+    for lang, path in lang_paths.items():
+        prefix = path.strip("/")
+        lang_prefix[lang] = prefix
+
+    # Collect all HTML files with their detected language
+    all_files: list[dict] = []
+    for f in base.rglob("*.html"):
+        rel = str(f.relative_to(base)).replace("\\", "/")
+
+        # Detect language from html lang attribute
+        detected_lang = None
+        try:
+            content = f.read_text(encoding="utf-8")
+            m = re.search(r'<html[^>]*lang=["\']([a-z]{2})["\']', content, re.I)
+            if m:
+                detected_lang = m.group(1).lower()
+        except Exception:
+            pass
+
+        # Also detect from path prefix
+        path_lang = None
+        for lang, prefix in lang_prefix.items():
+            if prefix and rel.startswith(prefix + "/"):
+                path_lang = lang
+                break
+        if not path_lang and rel.split("/")[0] in lang_prefix.values():
+            pfx = rel.split("/")[0]
+            for lang, prefix in lang_prefix.items():
+                if prefix == pfx:
+                    path_lang = lang
+                    break
+
+        all_files.append({
+            "path": rel,
+            "lang": detected_lang or path_lang or "unknown",
+            "path_lang": path_lang,
+        })
+
+    # Group by "content slug" — the path minus any language prefix
+    # e.g., "blog/my-article/index.html" and "jp/blog/my-article/index.html"
+    # share the same content_slug "blog/my-article/index.html"
+    def content_slug(rel: str) -> str:
+        parts = rel.split("/")
+        # Strip known language prefixes from the path
+        for prefix in lang_prefix.values():
+            if prefix and parts[0] == prefix:
+                return "/".join(parts[1:])
+        return rel
+
+    # Build existing translations: content_slug → {lang: path}
+    existing: dict[str, dict[str, str]] = {}
+    for f in all_files:
+        slug = content_slug(f["path"])
+        if slug not in existing:
+            existing[slug] = {}
+        existing[slug][f["lang"]] = f["path"]
+
+    # Find missing translations
+    primary_lang = list(lang_paths.keys())[0]
+    missing = []
+    for slug, translations in existing.items():
+        # Only consider content that exists in the primary language
+        if primary_lang not in translations:
+            continue
+        for target_lang in lang_paths:
+            if target_lang == primary_lang:
+                continue
+            if target_lang not in translations:
+                source_path = translations[primary_lang]
+                # Build target path by mapping the primary prefix → target prefix
+                target_prefix = lang_prefix.get(target_lang, "")
+                target_path = f"{target_prefix}/{slug}" if target_prefix else slug
+                missing.append({
+                    "source_lang": primary_lang,
+                    "target_lang": target_lang,
+                    "source_path": source_path,
+                    "target_path": target_path,
+                })
+
+    # Also check reverse direction (e.g., JP pages missing in EN)
+    if lang_pairs:
+        for lang in lang_paths:
+            if lang == primary_lang:
+                continue
+            for slug, translations in existing.items():
+                if lang in translations and primary_lang not in translations:
+                    src = translations[lang]
+                    target_prefix = lang_prefix.get(primary_lang, "")
+                    tgt = f"{target_prefix}/{slug}" if target_prefix else slug
+                    missing.append({
+                        "source_lang": lang,
+                        "target_lang": primary_lang,
+                        "source_path": src,
+                        "target_path": tgt,
+                    })
+
+    # Deduplicate
+    seen = set()
+    unique = []
+    for m in missing:
+        key = (m["source_path"], m["target_lang"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(m)
+
+    return {
+        "missing": sorted(unique, key=lambda x: x["source_path"]),
+        "count": len(unique),
+        "languages": list(lang_paths.keys()),
+        "primary_language": primary_lang,
+    }
 
 
 @router.get("/articles")
@@ -538,7 +654,11 @@ def _build_article_prompt(
     from datetime import datetime
     today = datetime.utcnow().strftime("%Y-%m-%d")
 
-    lang_name = {"en": "English", "ja": "Japanese", "zh": "Chinese"}.get(language, "English")
+    lang_name = {
+        "en": "English", "ja": "Japanese", "zh": "Chinese",
+        "ko": "Korean", "fr": "French", "de": "German",
+        "es": "Spanish", "pt": "Portuguese", "ru": "Russian",
+    }.get(language, language.capitalize())
     kw_list = [k.strip() for k in keywords.split(",") if k.strip()]
 
     type_labels = {
