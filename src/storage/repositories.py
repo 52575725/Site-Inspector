@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional, Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.storage.models import AuditLog, Fix, Issue, PageScan, Scan, Target, Verification
@@ -189,6 +189,23 @@ class VerificationRepository:
             select(Verification).where(Verification.status == "pending")
         )
         return result.scalars().all()
+
+    async def get_outcome_counts_by_category(
+        self, target_name: str,
+    ) -> list[tuple[str, str, int]]:
+        result = await self.session.execute(
+            select(Issue.category, Verification.status, func.count(Verification.id))
+            .join(Fix, Verification.fix_id == Fix.id)
+            .join(Issue, Fix.issue_id == Issue.id)
+            .join(Scan, Issue.scan_id == Scan.id)
+            .join(Target, Scan.target_id == Target.id)
+            .where(
+                Target.name == target_name,
+                Verification.status.in_(("improved", "degraded", "unchanged")),
+            )
+            .group_by(Issue.category, Verification.status)
+        )
+        return [(category, status, count) for category, status, count in result.all()]
 
     async def update_status(self, verification_id: int, status: str, value_after: float) -> None:
         await self.session.execute(
