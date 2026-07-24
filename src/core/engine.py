@@ -60,14 +60,30 @@ class Engine:
             analyzer = Analyzer(self.settings, session)
             issues = await analyzer.analyze_scan(scan.id, scan.pages_crawled)
 
-            # Phase 3: Auto-Fix (P0 + P1 only)
+            # Phase 3: Plan, then propose or execute only plan-approved issues.
+            plan = None
             if issues:
                 fixer = FixOrchestrator(
                     self.settings, session, ollama=self.ollama,
                 )
-                fixes = await fixer.run_fixes(issues, dry_run=dry_run)
+                from src.agents.seo_planning_agent import SEOPlanningAgent
+
+                planner = SEOPlanningAgent(fixer.fixers)
+                plan = await planner.create_plan(
+                    issues,
+                    scan_id=scan.id,
+                    target_name=self.settings.target_name,
+                )
+                plan_path = (
+                    self.settings.data_dir / "reports" / "plans"
+                    / f"scan-{scan.id}-plan.json"
+                )
+                plan.write_json(plan_path)
+                planned_issues = plan.select_issues(issues, dry_run=dry_run)
+                fixes = await fixer.run_fixes(planned_issues, dry_run=dry_run)
             else:
                 fixes = []
+                plan_path = None
 
             # Phase 4: Verification setup
             verifier = Verifier(self.settings, session)
@@ -95,6 +111,11 @@ class Engine:
             "new_issues": scan.total_issues_found,
             "fixes_applied": len(fixes),
             "report_path": str(report_path),
+            "plan_path": str(plan_path) if plan_path else None,
+            "planned_actions": len(plan.actions) if plan else 0,
+            "actions_requiring_approval": (
+                sum(action.approval_required for action in plan.actions) if plan else 0
+            ),
         }
 
     async def run_quick_scan(self, url: str, name: str | None = None,
