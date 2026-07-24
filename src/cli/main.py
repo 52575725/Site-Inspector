@@ -10,6 +10,7 @@ from rich.console import Console
 
 from src.cli.commands import (
     fix_cmd,
+    plan_cmd,
     report_cmd,
     scan_cmd,
     schedule_cmd,
@@ -27,6 +28,7 @@ app = typer.Typer(
 )
 
 app.add_typer(scan_cmd, name="scan")
+app.add_typer(plan_cmd, name="plan")
 app.add_typer(fix_cmd, name="fix")
 app.add_typer(verify_cmd, name="verify")
 app.add_typer(report_cmd, name="report")
