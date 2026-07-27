@@ -76,6 +76,9 @@ async function loadPlan() {
              <div class="ps defer"><div class="ps-val">${deferred}</div><div class="ps-lbl">Deferred</div></div>
              <div class="ps"><div class="ps-val">${p.warnings ? p.warnings.length : 0}</div><div class="ps-lbl">Warnings</div></div>`;
         document.getElementById('plan-exec-summary').textContent = p.executive_summary || '';
+        if (p.ai_strategy_note) {
+            document.getElementById('plan-exec-summary').textContent += ` AI advisory: ${p.ai_strategy_note}`;
+        }
         document.getElementById('plan-exec-summary').style.display = p.executive_summary ? '' : 'none';
 
         // Phase groups

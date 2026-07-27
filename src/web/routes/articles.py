@@ -29,6 +29,8 @@ class GenerateRequest(BaseModel):
     language: str = "en"
     word_count: int = 800
     page_type: str = "blog"  # blog, market_analysis, product_review, guide, news, landing
+    with_research: bool = True  # search authoritative sources for citations
+    topic_area: str = "silver"  # silver, trade, logistics, finance
 
 
 class TranslateRequest(BaseModel):
@@ -488,12 +490,48 @@ async def generate_article(request: Request, body: GenerateRequest):
     if not api_key:
         raise HTTPException(status_code=400, detail="DeepSeek API key not configured")
 
+    # ── Research phase: search authoritative sources for citations ──
+    research_findings = ""
+    citations_used = []
+    if body.with_research:
+        from src.ai.article_researcher import (
+            ResearchResult,
+            research_topic,
+            build_citation_prompt,
+            get_static_citations,
+        )
+        kw_list = [k.strip() for k in body.keywords.split(",") if k.strip()]
+        try:
+            research = await research_topic(
+                topic=body.topic,
+                keywords=kw_list,
+                topic_area=body.topic_area,
+                max_sources=5,
+            )
+            if research.findings:
+                research_findings = build_citation_prompt(research.findings)
+                citations_used = [
+                    {"label": f.source_label, "url": f.url, "type": f.source_type}
+                    for f in research.findings
+                ]
+                logger.info(
+                    f"Research: found {len(research.findings)} sources for '{body.topic}'"
+                )
+            else:
+                # Fallback to static authoritative citations
+                research_findings = get_static_citations(body.topic_area)
+                logger.info(f"Research: no live results, using static citations for '{body.topic}'")
+        except Exception as e:
+            logger.warning(f"Research failed for '{body.topic}': {e}")
+            research_findings = get_static_citations(body.topic_area)
+
     prompt = _build_article_prompt(
         topic=body.topic,
         keywords=body.keywords,
         language=body.language,
         word_count=body.word_count,
         page_type=body.page_type,
+        research_findings=research_findings,
     )
 
     try:
@@ -536,6 +574,8 @@ async def generate_article(request: Request, body: GenerateRequest):
         "page_type": body.page_type,
         "title": title,
         "html": html_content,
+        "citations": citations_used,
+        "with_research": body.with_research,
         "created_at": datetime.utcnow().isoformat(),
         "pushed": False,
     }
@@ -788,6 +828,7 @@ def _extract_title(html_content: str) -> str:
 
 def _build_article_prompt(
     topic: str, keywords: str, language: str, word_count: int, page_type: str,
+    research_findings: str = "",
 ) -> str:
     from datetime import datetime
     today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -834,7 +875,11 @@ def _build_article_prompt(
 
     structure_hint = type_structure.get(page_type, "")
 
+    citation_section = research_findings if research_findings else ""
+
     return f"""Write a complete, SEO-optimized HTML article.
+
+{citation_section}
 
 Topic: {topic}
 Article Type: {type_label}

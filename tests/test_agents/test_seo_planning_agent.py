@@ -178,6 +178,29 @@ async def test_plan_explains_problem_solution_and_autonomous_decision():
 
 
 @pytest.mark.asyncio
+async def test_security_headers_are_not_classified_as_content_seo():
+    planner = SEOPlanningAgent([
+        FakeFixer(
+            "headers_fixer",
+            "semi_auto",
+            ["missing_content_security_policy"],
+        ),
+    ])
+    plan = await planner.create_plan(
+        [issue(1, "missing_content_security_policy", 0.9, tier="P0")],
+        scan_id=16,
+        target_name="example",
+    )
+
+    action = plan.actions[0]
+    assert action.phase == 4
+    assert "web server or CDN" in action.proposed_solution
+    assert "valid security headers" in action.expected_metrics
+    assert "business facts remain unchanged" not in action.validation_checks
+    assert "critical scripts" in action.rollback_condition
+
+
+@pytest.mark.asyncio
 async def test_capacity_selects_business_value_before_execution_phase():
     planner = SEOPlanningAgent(
         [FakeFixer("meta_fixer", "fully_auto", ["missing_title"])],
@@ -256,6 +279,7 @@ async def test_ai_can_only_annotate_known_actions():
     assert len(plan.actions) == 1
     assert plan.actions[0].action_id == "A01"
     assert plan.actions[0].strategic_note == "This note is grounded in supplied evidence."
+    assert plan.ai_strategy_note.startswith("Start with the indexability action")
     assert not plan.actions[0].approval_required
     assert "A99" not in plan.model_dump_json()
 
@@ -288,7 +312,7 @@ async def test_plan_json_round_trip(tmp_path):
     path = plan.write_json(tmp_path / "plan.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
 
-    assert payload["schema_version"] == "1.2"
+    assert payload["schema_version"] == "1.3"
     assert payload["scan_id"] == 10
     assert payload["actions"][0]["evidence"][0]["issue_id"] == 1
 

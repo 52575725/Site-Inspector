@@ -17,22 +17,33 @@ class BrokenLinksInspector(BaseInspector):
     """Inspect all links on a page for 404/500 errors, redirect chains,
     mixed content, and broken external links.
 
-    Internal links are checked with full GET requests.  External links
-    are checked with lightweight HEAD requests (with GET fallback) to
-    verify they're reachable without downloading full pages.
+    Internal links: full GET requests.
+    External links: HEAD first → if blocked (403/405/406) → Playwright browser.
     """
 
     inspector_name = "broken_links"
 
     def __init__(self, client: httpx.AsyncClient | None = None):
         self.client = client or httpx.AsyncClient(timeout=15, follow_redirects=False)
-        self._semaphore = None
+        self._browser = None
+        self._playwright = None
+        self._browser_available: bool | None = None
 
     async def setup(self) -> None:
         pass
 
     async def teardown(self) -> None:
         await self.client.aclose()
+        if self._browser:
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
+        if self._playwright:
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
 
     async def inspect(self, url: str, html_content: str,
                       headers: dict | None = None) -> list[RawFinding]:
@@ -144,49 +155,97 @@ class BrokenLinksInspector(BaseInspector):
                 return None
 
         async def check_external_link(tag_type: str, link_url: str) -> RawFinding | None:
-            """Check external link with HEAD request, fall back to GET."""
+            """Check external link: HEAD → GET → Playwright browser fallback."""
             async with semaphore:
+                status = None
+                method = "head"
+
+                # Step 1: HEAD request
                 try:
-                    # Try HEAD first
-                    try:
-                        resp = await self.client.head(link_url)
-                    except Exception:
-                        # Fall back to GET with stream to avoid downloading body
-                        resp = await self.client.get(link_url)
-
+                    resp = await self.client.head(link_url)
                     status = resp.status_code
+                except Exception:
+                    status = None
 
-                    if status >= 500:
-                        return RawFinding(
-                            url=url, inspector=self.inspector_name,
-                            category="external_link_broken",
-                            description=(
-                                f"External {tag_type} returns {status}: {link_url}. "
-                                f"Consider removing or updating this link."
-                            ),
-                            element=link_url,
-                            current_value=str(status),
+                # Step 2: If HEAD blocked, try GET
+                if status is None or status in (403, 405, 406, 429):
+                    try:
+                        resp = await self.client.get(
+                            link_url,
+                            headers={"User-Agent": "Mozilla/5.0 (compatible; SiteInspector/1.0)"},
                         )
-                    if status >= 400 and status < 500:
-                        return RawFinding(
-                            url=url, inspector=self.inspector_name,
-                            category="external_link_warning",
-                            description=(
-                                f"External {tag_type} returns {status}: {link_url}. "
-                                f"Verify the link is still valid."
-                            ),
-                            element=link_url,
-                            current_value=str(status),
-                        )
-                except httpx.TimeoutException:
+                        status = resp.status_code
+                        method = "get"
+                    except Exception:
+                        status = None
+
+                # Step 3: If still blocked, try Playwright browser
+                if status is None or status in (403, 406):
+                    browser_status = await _check_with_browser(link_url)
+                    if browser_status is not None:
+                        status = browser_status
+                        method = "browser"
+
+                if status is None:
                     return RawFinding(
                         url=url, inspector=self.inspector_name,
-                        category="external_link_timeout",
-                        description=f"External link timed out: {link_url}",
+                        category="external_link_unreachable",
+                        description=(
+                            f"External {tag_type} unreachable: {link_url}. "
+                            f"All methods (HEAD/GET/browser) failed."
+                        ),
                         element=link_url,
+                        current_value="unreachable",
                     )
-                except Exception:
-                    pass  # External links can fail for many reasons
+
+                if status >= 500:
+                    return RawFinding(
+                        url=url, inspector=self.inspector_name,
+                        category="external_link_broken",
+                        description=(
+                            f"External {tag_type} returns {status}: {link_url} "
+                            f"(verified via {method})"
+                        ),
+                        element=link_url,
+                        current_value=str(status),
+                    )
+                if status >= 400 and status < 500:
+                    return RawFinding(
+                        url=url, inspector=self.inspector_name,
+                        category="external_link_warning",
+                        description=(
+                            f"External {tag_type} returns {status}: {link_url} "
+                            f"(verified via {method}). Verify manually."
+                        ),
+                        element=link_url,
+                        current_value=str(status),
+                    )
+                return None
+
+        async def _check_with_browser(link_url: str) -> int | None:
+            """Playwright browser fallback for blocked external links."""
+            if self._browser_available is False:
+                return None
+            try:
+                from playwright.async_api import async_playwright
+                if self._playwright is None:
+                    self._playwright = await async_playwright().start()
+                    self._browser = await self._playwright.chromium.launch(
+                        headless=True, args=["--no-sandbox"],
+                    )
+                    self._browser_available = True
+                page = await self._browser.new_page()
+                try:
+                    resp = await page.goto(
+                        link_url, wait_until="domcontentloaded", timeout=10000,
+                    )
+                    return resp.status if resp else 200
+                finally:
+                    await page.close()
+            except ImportError:
+                self._browser_available = False
+                return None
+            except Exception:
                 return None
 
         tasks = [check_internal_link(tt, lu) for tt, lu in internal_links]

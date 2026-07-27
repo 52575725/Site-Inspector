@@ -28,6 +28,7 @@ from src.inspectors.content_gap import ContentGapDetector
 from src.inspectors.content_quality import ContentQualityInspector
 from src.inspectors.crawl_budget import CrawlBudgetInspector
 from src.inspectors.eeat import EEATInspector
+from src.inspectors.external_references import ExternalReferencesInspector
 from src.inspectors.headers import HeadersInspector
 from src.inspectors.image_seo import ImageSEOInspector
 from src.inspectors.js_seo import JSSeoInspector
@@ -396,6 +397,7 @@ class ScanOrchestrator:
             JSSeoInspector(),
             CrawlBudgetInspector(),
             EEATInspector(),
+            ExternalReferencesInspector(target_config=target_config),
             AccessibilityInspector(),
             PerformanceInspector(
                 lighthouse_path=self.settings.lighthouse_path,
