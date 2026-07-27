@@ -10,6 +10,7 @@ from src.ai.deepseek_client import DeepSeekClient
 from src.ai.ollama_client import OllamaClient
 from src.core.analyzer import Analyzer
 from src.core.fix_orchestrator import FixOrchestrator
+from src.core.planning_service import PlanningService
 from src.core.scan_orchestrator import ScanOrchestrator
 from src.core.verifier import Verifier
 from src.reporters.daily_report import DailyReportGenerator
@@ -83,25 +84,19 @@ class Engine:
                 fixer = FixOrchestrator(
                     self.settings, session, ollama=self.ollama,
                 )
-                from src.agents.planning_context import PlanningContextCollector
-                from src.agents.seo_planning_agent import SEOPlanningAgent
-
-                planner = SEOPlanningAgent(fixer.fixers)
-                context = await PlanningContextCollector(
-                    self.settings, session,
-                ).collect(issues)
-                plan = await planner.create_plan(
+                decision = await PlanningService(
+                    self.settings,
+                    session,
+                    fixer.fixers,
+                    reasoner=self.deepseek,
+                ).decide(
                     issues,
                     scan_id=scan.id,
                     target_name=self.settings.target_name,
-                    context=context,
                 )
-                plan_path = (
-                    self.settings.data_dir / "reports" / "plans"
-                    / f"scan-{scan.id}-plan.json"
-                )
-                plan.write_json(plan_path)
-                planned_issues = plan.select_issues(issues, dry_run=dry_run)
+                plan = decision.plan
+                plan_path = decision.path
+                planned_issues = decision.select_issues(issues, preview=dry_run)
                 fixes = await fixer.run_fixes(planned_issues, dry_run=dry_run)
             else:
                 fixes = []
@@ -197,8 +192,10 @@ class Engine:
             await scan_repo.set_phase(scan.id, "fixing")
             await session.commit()
 
-            # Phase 3: Fixes (inline suggestions OR real source-based fixes)
+            # Phase 3: Decide, then fix only issues selected by the planning agent.
             pr_url_result = None
+            plan = None
+            plan_path = None
             if issues:
                 page_contents: dict[str, str] = {}
                 for cp in orchestrator._last_crawled_pages:
@@ -206,6 +203,22 @@ class Engine:
                         page_contents[cp.url] = cp.html_content
 
                 fixer = FixOrchestrator(self.settings, session, ollama=self.ollama)
+                decision = await PlanningService(
+                    self.settings,
+                    session,
+                    fixer.fixers,
+                    reasoner=self.deepseek,
+                ).decide(
+                    issues,
+                    scan_id=scan.id,
+                    target_name=name,
+                )
+                plan = decision.plan
+                plan_path = decision.path
+                planned_issues = decision.select_issues(
+                    issues,
+                    preview=not has_repo,
+                )
 
                 if has_repo:
                     # Real fixes: clone repo, fix source files, commit, push PR
@@ -224,7 +237,7 @@ class Engine:
                     else:
                         # When push_changes is True, skip approval and apply fixes directly
                         fixes = await fixer.run_fixes(
-                            issues, dry_run=False, source_override=source,
+                            planned_issues, dry_run=False, source_override=source,
                         )
                         if fixes:
                             from src.git.workflow import GitWorkflow
@@ -277,7 +290,7 @@ class Engine:
                 else:
                     # Inline suggestions from crawled HTML
                     fixes = await fixer.run_fixes(
-                        issues, dry_run=True, inline_contents=page_contents,
+                        planned_issues, dry_run=True, inline_contents=page_contents,
                     )
             else:
                 fixes = []
@@ -303,6 +316,15 @@ class Engine:
             "new_issues": scan.total_issues_found,
             "fixes_suggested": len(fixes),
             "report_path": str(report_path),
+            "plan_path": str(plan_path) if plan_path else None,
+            "planned_actions": len(plan.actions) if plan else 0,
+            "autonomous_actions": (
+                sum(action.decision == "execute_automatically" for action in plan.actions)
+                if plan else 0
+            ),
+            "actions_requiring_approval": (
+                sum(action.approval_required for action in plan.actions) if plan else 0
+            ),
         }
 
         # Send desktop notification
