@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Site Inspector{% endblock %}</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/static/css/app.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     {% block head %}{% endblock %}
@@ -26,6 +27,9 @@
             </a>
             <a href="/articles" class="nav-item {% if request.url.path.startswith('/articles') %}active{% endif %}">
                 &#9997; AI Articles
+            </a>
+            <a href="/article-images" class="nav-item {% if request.url.path.startswith('/article-images') %}active{% endif %}">
+                &#9638; Article Images
             </a>
             <a href="/tools" class="nav-item {% if request.url.path.startswith('/tools') %}active{% endif %}">
                 &#128295; Tools

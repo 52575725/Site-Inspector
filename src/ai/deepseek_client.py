@@ -96,3 +96,43 @@ class DeepSeekClient:
         except Exception as e:
             logger.error(f"DeepSeek request failed: {e}")
             raise
+
+    async def generate_json(
+        self,
+        prompt: str,
+        system: str = "",
+        model: str | None = None,
+        temperature: float = 0.3,
+        max_tokens: int = 2000,
+    ) -> dict:
+        """Generate a JSON-structured response via DeepSeek.
+
+        Appends a JSON-output instruction to the prompt and parses the
+        response.  Falls back to {"raw": ..., "error": "..."} on parse failure.
+        """
+        import json
+
+        json_prompt = (
+            f"{prompt}\n\n"
+            f"IMPORTANT: Return ONLY valid JSON. No markdown fences, "
+            f"no explanations outside the JSON object."
+        )
+        raw = await self.generate_text(
+            prompt=json_prompt,
+            system=system,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        # Strip markdown code fences if present
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[-1] if "\n" in cleaned else cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            logger.debug(f"DeepSeek JSON parse failed, raw: {raw[:300]}")
+            return {"raw": raw, "error": "JSON parse failed"}

@@ -33,6 +33,7 @@ from src.fixers.sitemap_fixer import SitemapFixer
 from src.git.pr_template import generate_pr_body, generate_pr_title
 from src.git.workflow import GitWorkflow
 from src.core.fix_validator import validate_html, summarize_validation
+from src.core.html_sanitizer import sanitize_html
 from src.presentation.issue_explainer import describe_issue
 from src.sources.base import BaseSource, resolve_within
 from src.sources.http_source import HttpSource
@@ -250,6 +251,25 @@ class FixOrchestrator:
 
         # Process each page — chain fixers on a single content string
         for file_path, items in page_groups.items():
+            # ── Pre-fix sanitization: catch malformed HTML before fixers touch it ──
+            raw_content = original_snapshots[file_path]
+            sanitize_result = sanitize_html(file_path, raw_content)
+            if sanitize_result.was_malformed:
+                logger.warning(
+                    f"HTML sanitized for {file_path}: "
+                    f"{'; '.join(sanitize_result.issues_fixed)}"
+                )
+                # Update snapshot so fixers work on clean HTML
+                original_snapshots[file_path] = sanitize_result.sanitized
+                if sanitize_result.sanitized != raw_content:
+                    await self.audit_repo.log(
+                        "html_sanitized", "fix",
+                        details={
+                            "file_path": file_path,
+                            "issues_found": sanitize_result.issues_found,
+                            "issues_fixed": sanitize_result.issues_fixed,
+                        },
+                    )
             # Enforce per-file cap
             if len(items) > self.MAX_FIXES_PER_FILE:
                 reason = (
@@ -486,6 +506,20 @@ class FixOrchestrator:
                 page_cache[file_path] = content
 
             page_content = page_cache[file_path]
+
+            # ── Pre-fix sanitization for inline path ────────────────
+            if not getattr(self, '_sanitized_files', None):
+                self._sanitized_files: set[str] = set()
+            if file_path not in self._sanitized_files:
+                sanitize_result = sanitize_html(file_path, page_content)
+                if sanitize_result.was_malformed:
+                    logger.warning(
+                        f"HTML sanitized for {file_path} (inline): "
+                        f"{'; '.join(sanitize_result.issues_fixed)}"
+                    )
+                    page_content = sanitize_result.sanitized
+                    page_cache[file_path] = page_content
+                self._sanitized_files.add(file_path)
 
             issue_dict = {
                 "id": issue.id,

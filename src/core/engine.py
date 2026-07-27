@@ -6,6 +6,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import Settings
+from src.ai.deepseek_client import DeepSeekClient
 from src.ai.ollama_client import OllamaClient
 from src.core.analyzer import Analyzer
 from src.core.fix_orchestrator import FixOrchestrator
@@ -30,6 +31,7 @@ class Engine:
         self.settings = settings
         self.session_factory = session_factory
         self._ollama: Optional[OllamaClient] = None
+        self._deepseek: Optional[DeepSeekClient] = None
 
     @property
     def ollama(self) -> OllamaClient:
@@ -37,9 +39,23 @@ class Engine:
             self._ollama = OllamaClient(self.settings)
         return self._ollama
 
+    @property
+    def deepseek(self) -> DeepSeekClient | None:
+        if not self.settings.deepseek_enabled or not self.settings.deepseek_api_key:
+            return None
+        if self._deepseek is None:
+            self._deepseek = DeepSeekClient(
+                api_key=self.settings.deepseek_api_key,
+                model=self.settings.deepseek_model,
+                timeout=self.settings.deepseek_timeout,
+            )
+        return self._deepseek
+
     async def close(self) -> None:
         if self._ollama:
             await self._ollama.close()
+        if self._deepseek:
+            await self._deepseek.close()
 
     async def run_daily_scan(self, *, dry_run: bool = True) -> dict:
         """Execute a full daily scan: detect → analyze → fix → report.
@@ -53,6 +69,7 @@ class Engine:
             # Phase 1: Detect
             orchestrator = ScanOrchestrator(
                 self.settings, session, ollama=self.ollama,
+                deepseek=self.deepseek,
             )
             scan = await orchestrator.run_full_scan()
 
@@ -151,7 +168,7 @@ class Engine:
             scan_repo = ScanRepository(session)
 
             # Phase 1: Crawl + Inspect
-            orchestrator = ScanOrchestrator(self.settings, session, ollama=self.ollama)
+            orchestrator = ScanOrchestrator(self.settings, session, ollama=self.ollama, deepseek=self.deepseek)
             scan = await orchestrator.run_full_scan(
                 target_name=name,
                 target_base_url=url,

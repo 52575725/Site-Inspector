@@ -1,0 +1,334 @@
+{% extends "base.html" %}
+{% block title %}Article Images - Site Inspector{% endblock %}
+
+{% block content %}
+<div class="image-workspace">
+    <header class="workspace-header">
+        <div>
+            <h1>文章配图</h1>
+            <p id="source-root" class="path-label"></p>
+        </div>
+        <span class="review-badge">Review required</span>
+    </header>
+
+    <div class="image-workspace-grid">
+        <aside class="article-panel">
+            <div class="panel-heading">
+                <h2>文章</h2>
+                <span id="article-count" class="count-label">0</span>
+            </div>
+            <label class="field-label" for="article-filter">筛选</label>
+            <input class="input" id="article-filter" type="search" placeholder="标题或路径">
+            <div id="article-list" class="article-list" aria-live="polite">
+                <div class="empty-state">正在读取文章...</div>
+            </div>
+        </aside>
+
+        <main class="image-main">
+            <section class="selection-toolbar">
+                <div class="selected-article">
+                    <span class="field-label">当前文章</span>
+                    <strong id="selected-title">未选择</strong>
+                    <span id="selected-meta" class="meta-line"></span>
+                </div>
+                <div class="toolbar-controls">
+                    <div>
+                        <span class="field-label">目标图片数</span>
+                        <div class="segmented" role="group" aria-label="目标图片数">
+                            <button type="button" data-count="3">3</button>
+                            <button type="button" class="active" data-count="4">4</button>
+                        </div>
+                    </div>
+                    <button id="search-button" class="btn btn-primary" type="button" disabled>
+                        搜索图片
+                    </button>
+                </div>
+            </section>
+
+            <div id="workspace-status" class="workspace-status" role="status"></div>
+
+            <section id="search-summary" class="search-summary" hidden>
+                <div>
+                    <span class="field-label">搜索词</span>
+                    <div id="query-list" class="query-list"></div>
+                </div>
+                <div class="selection-summary">
+                    <strong id="selection-count">0 / 0</strong>
+                    <span>已选择</span>
+                </div>
+            </section>
+
+            <section id="candidate-section" hidden>
+                <div class="section-heading">
+                    <h2>候选图片</h2>
+                    <div class="proposal-actions">
+                        <label id="ai-option" class="toggle" hidden>
+                            <input id="allow-ai" type="checkbox" checked>
+                            搜索不足时使用 AI
+                        </label>
+                        <button id="proposal-button" class="btn btn-primary" type="button">
+                            生成审核稿
+                        </button>
+                    </div>
+                </div>
+                <div id="candidate-grid" class="candidate-grid"></div>
+            </section>
+
+            <section id="proposal-section" class="proposal-section" hidden>
+                <div class="section-heading">
+                    <div>
+                        <h2>排版预览</h2>
+                        <p id="proposal-meta" class="meta-line"></p>
+                    </div>
+                    <a id="open-preview" class="btn btn-secondary" target="_blank" rel="noopener">新窗口打开</a>
+                </div>
+                <iframe id="proposal-preview" title="文章配图审核预览" sandbox></iframe>
+                <div class="output-row">
+                    <span class="field-label">审核稿目录</span>
+                    <code id="proposal-path"></code>
+                </div>
+            </section>
+        </main>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+.image-workspace{max-width:1500px;margin:0 auto}
+.workspace-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}
+.workspace-header h1{font-size:1.45rem;line-height:1.25}
+.path-label,.meta-line{color:var(--text-muted);font-size:.78rem;margin-top:4px;word-break:break-all}
+.review-badge{padding:5px 9px;border:1px solid #e0a800;border-radius:4px;background:#fff8df;color:#755700;font-size:.72rem;font-weight:700;text-transform:uppercase}
+.image-workspace-grid{display:grid;grid-template-columns:minmax(240px,300px) minmax(0,1fr);gap:16px;align-items:start}
+.article-panel{position:sticky;top:20px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:14px;max-height:calc(100vh - 40px);display:flex;flex-direction:column}
+.panel-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.panel-heading h2,.section-heading h2{font-size:1rem}
+.count-label{font-size:.75rem;color:var(--text-muted)}
+.field-label{display:block;color:var(--text-muted);font-size:.72rem;font-weight:700;margin-bottom:5px}
+.article-list{margin-top:10px;overflow:auto;display:grid;gap:4px}
+.article-item{width:100%;border:1px solid transparent;border-radius:5px;background:transparent;padding:9px;text-align:left;cursor:pointer;color:var(--text)}
+.article-item:hover{background:var(--bg)}
+.article-item.active{border-color:var(--navy);background:#edf4fa}
+.article-title{display:block;font-size:.82rem;font-weight:700;line-height:1.35}
+.article-path{display:block;color:var(--text-muted);font-size:.68rem;margin-top:3px;word-break:break-all}
+.article-stats{display:flex;gap:8px;color:var(--text-muted);font-size:.67rem;margin-top:5px}
+.image-main{min-width:0}
+.selection-toolbar{display:flex;align-items:end;justify-content:space-between;gap:16px;padding:14px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.selected-article{min-width:0}.selected-article strong{display:block;overflow-wrap:anywhere}
+.toolbar-controls,.proposal-actions{display:flex;align-items:end;gap:10px;flex-shrink:0}
+.segmented{display:grid;grid-template-columns:42px 42px;border:1px solid var(--border);border-radius:6px;overflow:hidden;height:34px}
+.segmented button{border:0;background:#fff;color:var(--text);cursor:pointer;font-weight:700}
+.segmented button+button{border-left:1px solid var(--border)}
+.segmented button.active{background:var(--navy);color:#fff}
+.workspace-status{min-height:38px;padding:10px 0;font-size:.82rem;color:var(--text-muted)}
+.workspace-status.error{color:var(--bad)}.workspace-status.success{color:var(--good)}
+.search-summary{display:flex;justify-content:space-between;gap:16px;align-items:start;padding:12px 0;border-bottom:1px solid var(--border)}
+.query-list{display:flex;flex-wrap:wrap;gap:5px}
+.query-token{padding:3px 7px;border-radius:4px;background:#e8eef3;color:#30475e;font-size:.72rem}
+.selection-summary{text-align:right;flex-shrink:0}.selection-summary strong{display:block;font-size:1rem}.selection-summary span{font-size:.68rem;color:var(--text-muted)}
+.candidate-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+.candidate-card{position:relative;display:block;border:1px solid var(--border);border-radius:7px;background:#fff;overflow:hidden;cursor:pointer}
+.candidate-card.selected{border-color:var(--navy);box-shadow:0 0 0 2px rgba(15,52,96,.12)}
+.candidate-card input{position:absolute;top:9px;left:9px;width:18px;height:18px;z-index:2;accent-color:var(--navy)}
+.candidate-image{display:block;width:100%;aspect-ratio:3/2;object-fit:cover;background:#eef1f4}
+.candidate-body{padding:9px}.candidate-alt{font-size:.78rem;line-height:1.35;min-height:2.7em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.candidate-meta{font-size:.68rem;color:var(--text-muted);margin-top:7px;display:grid;gap:3px}
+.candidate-links{display:flex;gap:8px;margin-top:7px;font-size:.68rem}
+.empty-state{padding:24px 10px;text-align:center;color:var(--text-muted);font-size:.8rem}
+.proposal-section{margin-top:18px;border-top:1px solid var(--border);padding-top:16px}
+#proposal-preview{width:100%;height:650px;border:1px solid var(--border);border-radius:6px;background:#fff}
+.output-row{margin-top:10px}.output-row code{display:block;padding:8px;background:#eef1f4;border-radius:4px;overflow-wrap:anywhere;font-size:.74rem}
+@media(max-width:900px){
+    .image-workspace-grid{grid-template-columns:1fr}.article-panel{position:static;max-height:360px}
+    .selection-toolbar,.search-summary{align-items:stretch;flex-direction:column}.toolbar-controls{justify-content:space-between}
+    .candidate-grid{grid-template-columns:repeat(2,minmax(0,1fr))}#proposal-preview{height:520px}
+}
+@media(max-width:560px){.candidate-grid{grid-template-columns:1fr}.toolbar-controls,.proposal-actions{align-items:stretch;flex-direction:column}.workspace-header{align-items:center}}
+</style>
+<script>
+const state = { articles: [], selected: null, targetCount: 4, search: null };
+const articleList = document.getElementById('article-list');
+const statusBox = document.getElementById('workspace-status');
+
+function escapeHtml(value) {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+}
+
+function setStatus(message, kind = '') {
+    statusBox.textContent = message;
+    statusBox.className = 'workspace-status' + (kind ? ' ' + kind : '');
+}
+
+async function readJson(response) {
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || `请求失败 (${response.status})`);
+    return data;
+}
+
+async function loadArticles() {
+    try {
+        const data = await readJson(await fetch('/api/article-images/articles'));
+        state.articles = data.articles || [];
+        document.getElementById('source-root').textContent = data.root || '';
+        document.getElementById('article-count').textContent = state.articles.length;
+        renderArticles();
+    } catch (error) {
+        articleList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+    }
+}
+
+function renderArticles() {
+    const filter = document.getElementById('article-filter').value.trim().toLowerCase();
+    const articles = state.articles.filter(item =>
+        !filter || item.title.toLowerCase().includes(filter) || item.path.toLowerCase().includes(filter)
+    );
+    if (!articles.length) {
+        articleList.innerHTML = '<div class="empty-state">没有匹配的文章</div>';
+        return;
+    }
+    articleList.innerHTML = articles.map(item => `
+        <button type="button" class="article-item ${state.selected && state.selected.path === item.path ? 'active' : ''}" data-path="${escapeHtml(item.path)}">
+            <span class="article-title">${escapeHtml(item.title)}</span>
+            <span class="article-path">${escapeHtml(item.path)}</span>
+            <span class="article-stats"><span>${item.word_count} words</span><span>${item.image_count} images</span><span>${item.sections.length} sections</span></span>
+        </button>
+    `).join('');
+    articleList.querySelectorAll('.article-item').forEach(button => {
+        button.addEventListener('click', () => selectArticle(button.dataset.path));
+    });
+}
+
+function selectArticle(path) {
+    state.selected = state.articles.find(item => item.path === path) || null;
+    state.search = null;
+    renderArticles();
+    document.getElementById('selected-title').textContent = state.selected ? state.selected.title : '未选择';
+    document.getElementById('selected-meta').textContent = state.selected
+        ? `${state.selected.path} · ${state.selected.word_count} words · ${state.selected.image_count} images`
+        : '';
+    document.getElementById('search-button').disabled = !state.selected;
+    document.getElementById('search-summary').hidden = true;
+    document.getElementById('candidate-section').hidden = true;
+    document.getElementById('proposal-section').hidden = true;
+    setStatus('');
+}
+
+document.getElementById('article-filter').addEventListener('input', renderArticles);
+document.querySelectorAll('.segmented button').forEach(button => {
+    button.addEventListener('click', () => {
+        state.targetCount = Number(button.dataset.count);
+        document.querySelectorAll('.segmented button').forEach(item => item.classList.toggle('active', item === button));
+    });
+});
+
+document.getElementById('search-button').addEventListener('click', async () => {
+    if (!state.selected) return;
+    const button = document.getElementById('search-button');
+    button.disabled = true;
+    setStatus('正在联网搜索并核对授权信息...');
+    document.getElementById('proposal-section').hidden = true;
+    try {
+        state.search = await readJson(await fetch('/api/article-images/search', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({article_path: state.selected.path, target_count: state.targetCount}),
+        }));
+        renderSearchResults();
+        setStatus(`找到 ${state.search.candidates.length} 张候选图片`, 'success');
+    } catch (error) {
+        setStatus(error.message, 'error');
+    } finally {
+        button.disabled = false;
+    }
+});
+
+function renderSearchResults() {
+    const search = state.search;
+    document.getElementById('search-summary').hidden = false;
+    document.getElementById('candidate-section').hidden = false;
+    document.getElementById('query-list').innerHTML = search.queries.map(query => `<span class="query-token">${escapeHtml(query)}</span>`).join('');
+    document.getElementById('ai-option').hidden = !search.ai_fallback_available;
+    const grid = document.getElementById('candidate-grid');
+    if (!search.candidates.length) {
+        grid.innerHTML = '<div class="empty-state">联网图库没有返回可验证授权的候选图片</div>';
+    } else {
+        grid.innerHTML = search.candidates.map((candidate, index) => `
+            <label class="candidate-card ${index < search.needed ? 'selected' : ''}">
+                <input type="checkbox" value="${escapeHtml(candidate.id)}" ${index < search.needed ? 'checked' : ''}>
+                <img class="candidate-image" src="${escapeHtml(candidate.thumbnail_url)}" alt="" loading="lazy" referrerpolicy="no-referrer">
+                <span class="candidate-body">
+                    <span class="candidate-alt">${escapeHtml(candidate.alt_text || candidate.query)}</span>
+                    <span class="candidate-meta">
+                        <span>${escapeHtml(candidate.source)} · ${escapeHtml(candidate.photographer || 'Unknown')}</span>
+                        <span>${escapeHtml(candidate.license_name || 'License unavailable')}</span>
+                        <span>${candidate.width || '?'} × ${candidate.height || '?'}</span>
+                    </span>
+                    <span class="candidate-links">
+                        ${candidate.source_page ? `<a href="${escapeHtml(candidate.source_page)}" target="_blank" rel="noopener noreferrer">来源</a>` : ''}
+                        ${candidate.license_url ? `<a href="${escapeHtml(candidate.license_url)}" target="_blank" rel="noopener noreferrer">许可证</a>` : ''}
+                    </span>
+                </span>
+            </label>
+        `).join('');
+        grid.querySelectorAll('input').forEach(input => input.addEventListener('change', enforceSelectionLimit));
+    }
+    updateSelectionCount();
+}
+
+function enforceSelectionLimit(event) {
+    const checked = [...document.querySelectorAll('#candidate-grid input:checked')];
+    if (checked.length > state.search.needed) {
+        event.target.checked = false;
+        setStatus(`最多选择 ${state.search.needed} 张，文章已有 ${state.search.article.image_count} 张`, 'error');
+    }
+    document.querySelectorAll('.candidate-card').forEach(card => card.classList.toggle('selected', card.querySelector('input').checked));
+    updateSelectionCount();
+}
+
+function updateSelectionCount() {
+    const selected = document.querySelectorAll('#candidate-grid input:checked').length;
+    const needed = state.search ? state.search.needed : 0;
+    document.getElementById('selection-count').textContent = `${selected} / ${needed}`;
+}
+
+document.getElementById('proposal-button').addEventListener('click', async () => {
+    if (!state.search) return;
+    const button = document.getElementById('proposal-button');
+    const candidateIds = [...document.querySelectorAll('#candidate-grid input:checked')].map(input => input.value);
+    button.disabled = true;
+    setStatus('正在下载、转换 WebP 并生成排版审核稿...');
+    try {
+        const proposal = await readJson(await fetch('/api/article-images/proposals', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                search_id: state.search.search_id,
+                candidate_ids: candidateIds,
+                allow_ai_fallback: document.getElementById('allow-ai').checked,
+            }),
+        }));
+        showProposal(proposal);
+        setStatus(`审核稿已生成，共插入 ${proposal.inserted} 张图片`, 'success');
+    } catch (error) {
+        setStatus(error.message, 'error');
+    } finally {
+        button.disabled = false;
+    }
+});
+
+function showProposal(proposal) {
+    const section = document.getElementById('proposal-section');
+    section.hidden = false;
+    document.getElementById('proposal-meta').textContent = `${proposal.article_path} · ${proposal.inserted} images · ${proposal.status}`;
+    document.getElementById('proposal-path').textContent = proposal.proposal_dir;
+    document.getElementById('proposal-preview').src = proposal.preview_url;
+    document.getElementById('open-preview').href = proposal.preview_url;
+    section.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+loadArticles();
+</script>
+{% endblock %}

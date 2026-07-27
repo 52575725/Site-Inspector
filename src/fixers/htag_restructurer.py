@@ -24,6 +24,19 @@ class HTagRestructurer(BaseFixer):
     async def generate_fix(self, issue: dict, source: BaseSource,
                            page_content: str) -> FixResult:
         category = issue.get("category", "")
+        file_path = issue.get("file_path", "")
+        issue_id = issue.get("id", 0)
+
+        # ── Pre-check: refuse to modify already-corrupted HTML ──────
+        if not self._input_is_safe(page_content):
+            return FixResult(
+                success=False, issue_id=issue_id,
+                fixer_name=self.fixer_name, fix_type=self.fix_type,
+                file_path=file_path,
+                before_content=page_content, after_content=page_content,
+                error_message="Input HTML appears corrupted — refusing to modify",
+            )
+
         soup = BeautifulSoup(page_content, "html.parser")
 
         if category == "missing_h1":
@@ -32,6 +45,37 @@ class HTagRestructurer(BaseFixer):
             page_content = self._fix_multiple_h1(soup)
         elif category == "h_tag_skip":
             page_content = self._fix_hierarchy_gap(soup)
+        else:
+            return FixResult(
+                success=False, issue_id=issue_id,
+                fixer_name=self.fixer_name, fix_type=self.fix_type,
+                file_path=file_path,
+                before_content=page_content, after_content=page_content,
+                error_message=f"Unknown category: {category}",
+            )
+
+        # ── Post-check: verify we didn't create duplicates ──────────
+        output_soup = BeautifulSoup(page_content, "html.parser")
+        title_tag = output_soup.find("title")
+        if title_tag:
+            title_text = title_tag.get_text(strip=True)
+            h1_texts = [h.get_text(strip=True) for h in output_soup.find_all("h1")]
+            h2_texts = [h.get_text(strip=True) for h in output_soup.find_all("h2")]
+            title_appearances = sum(
+                1 for t in h1_texts + h2_texts if t == title_text
+            )
+            if title_appearances > 2:
+                return FixResult(
+                    success=False, issue_id=issue_id,
+                    fixer_name=self.fixer_name, fix_type=self.fix_type,
+                    file_path=file_path,
+                    before_content=issue.get("before_content", ""),
+                    after_content=page_content,
+                    error_message=(
+                        f"Fix would create {title_appearances} duplicate title-as-headings "
+                        f"— likely BeautifulSoup corruption, aborted"
+                    ),
+                )
 
         diff = difflib.unified_diff(
             (issue.get("before_content") or "").splitlines(True),
@@ -41,14 +85,34 @@ class HTagRestructurer(BaseFixer):
 
         return FixResult(
             success=True,
-            issue_id=issue.get("id", 0),
+            issue_id=issue_id,
             fixer_name=self.fixer_name,
             fix_type=self.fix_type,
-            file_path=issue.get("file_path", ""),
+            file_path=file_path,
             before_content=issue.get("before_content", ""),
             after_content=page_content,
             diff="\n".join(diff),
         )
+
+    @staticmethod
+    def _input_is_safe(page_content: str) -> bool:
+        """Reject HTML that already shows signs of corruption."""
+        if not page_content or not page_content.strip():
+            return False
+
+        # Check for title text duplicated in headings (corruption signature)
+        title_match = re.search(r"<title>(.*?)</title>", page_content, re.IGNORECASE)
+        if title_match:
+            title_text = title_match.group(1).strip()
+            # Count title text occurrences after <body>
+            body_start = page_content.lower().find("<body")
+            if body_start >= 0:
+                after_body = page_content[body_start:]
+                count = len(re.findall(re.escape(title_text[:50]), after_body))
+                if count > 3:
+                    return False  # Already corrupted
+
+        return True
 
     def _add_h1(self, soup: BeautifulSoup, issue: dict) -> str:
         """Add an H1 if missing, using the page title or first meaningful heading.

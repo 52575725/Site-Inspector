@@ -3,6 +3,11 @@ targets:
     name: "helinsilver"
     base_url: "https://helinsilver.com"
     languages: ["en", "ja"]
+    business:
+      description: "B2B precious metals export company (Hong Kong Changjiang International Limited)"
+      industry: "precious_metals"
+      tone: "professional, authoritative, B2B"
+      target_audience: "international precious metals buyers, investors, and industry professionals"
     language_paths:
       en: "/"
       ja: "/jp/"

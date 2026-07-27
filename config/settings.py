@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     ollama_timeout: int = 120
 
     # DeepSeek
+    deepseek_enabled: bool = False
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-chat"
     deepseek_timeout: int = 120
@@ -65,6 +66,7 @@ class Settings(BaseSettings):
     crawl_timeout: int = 30
     crawl_max_retries: int = 3
     crawl_max_pages: int = 200
+    crawl_max_depth: int = 2
     crawl_user_agent: str = "SiteInspector/1.0 (+https://site-inspector.local)"
 
     # Lighthouse
@@ -134,9 +136,13 @@ class Settings(BaseSettings):
             ("crawling", "timeout_seconds"): "crawl_timeout",
             ("crawling", "max_retries"): "crawl_max_retries",
             ("crawling", "max_pages"): "crawl_max_pages",
+            ("crawling", "max_depth"): "crawl_max_depth",
             ("crawling", "user_agent"): "crawl_user_agent",
             ("lighthouse", "path"): "lighthouse_path",
             ("lighthouse", "flags"): "lighthouse_flags",
+            ("deepseek", "enabled"): "deepseek_enabled",
+            ("deepseek", "model"): "deepseek_model",
+            ("deepseek", "timeout"): "deepseek_timeout",
             ("priority_weights", "impact_scope"): "priority_impact_weight",
             ("priority_weights", "severity"): "priority_severity_weight",
             ("priority_weights", "fix_roi"): "priority_fix_roi_weight",

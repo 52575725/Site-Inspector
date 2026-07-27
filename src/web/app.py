@@ -10,6 +10,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from config.settings import Settings
 from src.storage.database import get_session_factory, init_db
 from src.web.security import is_allowed_web_origin
+from src.web.routes.article_images import router as article_images_router
 from src.web.routes.articles import router as articles_router
 from src.web.routes.dashboard import router as dashboard_router
 from src.web.routes.fixes import router as fixes_router
@@ -45,6 +46,7 @@ def create_app() -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
+    app.include_router(article_images_router)
     app.include_router(articles_router)
     app.include_router(dashboard_router)
     app.include_router(issues_router)

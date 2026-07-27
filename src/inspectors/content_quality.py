@@ -8,7 +8,11 @@ from bs4 import BeautifulSoup
 
 from src.ai.ollama_client import OllamaClient
 from src.ai.prompt_manager import PromptManager
-from src.ai.text_quality import assess_readability, detect_duplicate_risk
+from src.ai.text_quality import (
+    assess_readability,
+    detect_duplicate_risk,
+    detect_duplicate_risk_simhash,
+)
 from src.inspectors.base import BaseInspector, RawFinding
 
 logger = logging.getLogger(__name__)
@@ -109,15 +113,33 @@ class ContentQualityInspector(BaseInspector):
                     raw_metadata=readability,
                 ))
 
-        # Duplicate content detection
-        if self._all_page_texts:
-            dup_score = detect_duplicate_risk(text, self._all_page_texts)
+        # Duplicate content detection — embedding-based if Ollama available
+        if self._all_page_texts and len(self._all_page_texts) > 1:
+            embed_fn = None
+            if self.ollama:
+                try:
+                    health = await self.ollama.health_check()
+                    if health:
+                        embed_fn = self.ollama.embed
+                except Exception:
+                    pass
+
+            dup_score = await detect_duplicate_risk(
+                text, self._all_page_texts, embed_fn=embed_fn,
+            )
             if dup_score > 0.85:
+                detection_method = "embedding" if embed_fn else "simhash"
                 findings.append(RawFinding(
                     url=url, inspector=self.inspector_name,
                     category="duplicate_content",
-                    description=f"Content is {dup_score:.0%} similar to another page",
-                    raw_metadata={"similarity": dup_score},
+                    description=(
+                        f"Content is {dup_score:.0%} similar to another page "
+                        f"(detected via {detection_method})"
+                    ),
+                    raw_metadata={
+                        "similarity": round(dup_score, 3),
+                        "method": detection_method,
+                    },
                 ))
 
         # Ollama-based nuance analysis (optional)
