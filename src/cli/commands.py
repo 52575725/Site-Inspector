@@ -91,27 +91,25 @@ def fix_run(
 
             from src.core.analyzer import Analyzer
             from src.core.fix_orchestrator import FixOrchestrator
-            from src.agents.planning_context import PlanningContextCollector
-            from src.agents.seo_planning_agent import SEOPlanningAgent
+            from src.core.planning_service import PlanningService
 
             analyzer = Analyzer(settings, session)
             issues = await analyzer.analyze_scan(scan.id, scan.pages_crawled)
 
             fixer = FixOrchestrator(settings, session, ollama=engine.ollama)
-            planner = SEOPlanningAgent(fixer.fixers)
-            context = await PlanningContextCollector(settings, session).collect(issues)
-            plan = await planner.create_plan(
+            decision = await PlanningService(
+                settings,
+                session,
+                fixer.fixers,
+                reasoner=engine.deepseek,
+            ).decide(
                 issues,
                 scan_id=scan.id,
                 target_name=settings.target_name,
-                context=context,
             )
-            plan_path = (
-                settings.data_dir / "reports" / "plans"
-                / f"scan-{scan.id}-plan.json"
-            )
-            plan.write_json(plan_path)
-            planned_issues = plan.select_issues(issues, dry_run=dry_run)
+            plan = decision.plan
+            plan_path = decision.path
+            planned_issues = decision.select_issues(issues, preview=dry_run)
             fixes = await fixer.run_fixes(planned_issues, dry_run=dry_run)
 
             if dry_run:

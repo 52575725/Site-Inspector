@@ -92,6 +92,7 @@ class ScanOrchestrator:
         _name = target_name or self.settings.target_name
         _base_url = target_base_url or self.settings.target_base_url
         _languages = target_languages or self.settings.target_languages
+        target_config = self.settings.__class__.load_target(_name)
 
         # 1. Get or create target
         target = await self.target_repo.get_or_create(
@@ -172,7 +173,6 @@ class ScanOrchestrator:
         # Set content texts for dedup
         crawled_urls = [cp.url for cp in crawled_pages]
         page_htmls = {cp.url: cp.html_content for cp in crawled_pages}
-        target_config = self.settings.__class__.load_target(_name)
         sitemap_url = target_config.get(
             "sitemap_url",
             f"{_base_url}/sitemap.xml",

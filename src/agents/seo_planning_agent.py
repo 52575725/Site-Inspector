@@ -91,7 +91,7 @@ class DeferredIssue(BaseModel):
 
 
 class AuditPlan(BaseModel):
-    schema_version: str = "1.1"
+    schema_version: str = "1.2"
     scan_id: int
     target_name: str
     objective: str
@@ -260,7 +260,8 @@ class SEOPlanningAgent:
             item for item in ranked_groups
             if any(str(getattr(issue, "priority_tier", "P2")) == "P0" for issue in item[1])
         ]
-        optional = [item for item in ranked_groups if item not in mandatory]
+        mandatory_keys = {item[0] for item in mandatory}
+        optional = [item for item in ranked_groups if item[0] not in mandatory_keys]
         selected_by_value = (mandatory + optional)[: self.policy.max_actions]
         kept_groups = sorted(
             selected_by_value,

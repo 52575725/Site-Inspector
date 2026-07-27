@@ -159,6 +159,56 @@ async def test_business_goal_and_live_signals_change_action_order():
 
 
 @pytest.mark.asyncio
+async def test_plan_explains_problem_solution_and_autonomous_decision():
+    planner = SEOPlanningAgent([
+        FakeFixer("canonical_fixer", "fully_auto", ["missing_canonical"]),
+    ])
+    plan = await planner.create_plan(
+        [issue(1, "missing_canonical", 0.95, tier="P0")],
+        scan_id=14,
+        target_name="example",
+    )
+
+    action = plan.actions[0]
+    assert "missing canonical" in action.problem_statement
+    assert "canonical" in action.proposed_solution.lower()
+    assert action.decision == "execute_automatically"
+    assert action.solution_steps
+    assert plan.facts["autonomous_actions"] == 1
+
+
+@pytest.mark.asyncio
+async def test_capacity_selects_business_value_before_execution_phase():
+    planner = SEOPlanningAgent(
+        [FakeFixer("meta_fixer", "fully_auto", ["missing_title"])],
+        policy=PlanningPolicy(max_actions=1),
+    )
+    product_url = "https://example.com/products/high-value/"
+    context = PlanningContext(
+        objective=BusinessObjective(
+            goal="qualified_inquiries",
+            priority_url_patterns=["/products/"],
+        ),
+        page_signals={
+            product_url: PageSignals(gsc_position=8, gsc_ctr=0.01, ga_pageviews=500),
+        },
+    )
+    plan = await planner.create_plan(
+        [
+            issue(1, "missing_canonical", 0.35, url="https://example.com/blog/old/"),
+            issue(2, "missing_title", 0.8, url=product_url),
+        ],
+        scan_id=15,
+        target_name="example",
+        context=context,
+    )
+
+    assert len(plan.actions) == 1
+    assert plan.actions[0].issue_ids == [2]
+    assert plan.actions[0].business_value == 0.95
+
+
+@pytest.mark.asyncio
 async def test_protected_pages_and_degraded_history_require_approval():
     planner = SEOPlanningAgent([
         FakeFixer("canonical_fixer", "fully_auto", ["missing_canonical"]),
@@ -238,7 +288,7 @@ async def test_plan_json_round_trip(tmp_path):
     path = plan.write_json(tmp_path / "plan.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
 
-    assert payload["schema_version"] == "1.1"
+    assert payload["schema_version"] == "1.2"
     assert payload["scan_id"] == 10
     assert payload["actions"][0]["evidence"][0]["issue_id"] == 1
 

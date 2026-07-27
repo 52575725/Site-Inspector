@@ -92,9 +92,11 @@ async function loadPlan() {
                         <div class="pa-badges">
                             <span class="badge badge-${a.execution_mode === 'fully_auto' ? 'auto' : a.execution_mode === 'semi_auto' ? 'semi' : 'manual'}">${a.execution_mode}</span>
                             <span class="badge badge-${a.risk}">${a.risk} risk</span>
+                            <span class="badge badge-${a.decision === 'execute_automatically' ? 'auto' : 'semi'}">${escapeHtml(a.decision || 'review')}</span>
                             ${a.opportunity_score > 0.7 ? '<span class="badge badge-auto">high opp</span>' : ''}
                         </div>
-                        <div class="pa-rationale">${escapeHtml(a.rationale)}</div>
+                        <div class="pa-rationale"><strong>Problem:</strong> ${escapeHtml(a.problem_statement || a.rationale)}</div>
+                        <div class="pa-rationale"><strong>Solution:</strong> ${escapeHtml(a.proposed_solution || '')}</div>
                     </div>`).join('')}
             </div>`
         ).join('');
