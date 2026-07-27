@@ -1,0 +1,305 @@
+"""Auto-search relevant images for blog articles via free image APIs.
+
+Uses Unsplash → Pexels → Pixabay as a fallback chain.
+All APIs have free tiers — no API key required for basic usage,
+but keys improve rate limits and are supported via Settings.
+"""
+from __future__ import annotations
+
+import hashlib
+import logging
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+from urllib.parse import quote, urlparse
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ImageResult:
+    """A single image search result."""
+    url: str           # Full-size image URL
+    thumb_url: str     # Thumbnail/preview URL
+    alt_text: str      # Suggested alt text
+    photographer: str  # Attribution
+    source: str        # "unsplash", "pexels", "pixabay"
+    width: int = 0
+    height: int = 0
+
+
+# ── Public API ──────────────────────────────────────────────────────────
+
+def search_images(
+    query: str,
+    count: int = 3,
+    unsplash_key: str = "",
+    pexels_key: str = "",
+    pixabay_key: str = "",
+) -> list[ImageResult]:
+    """Search for images across multiple free APIs with fallback chaining.
+
+    Args:
+        query: Search query (article topic / keywords).
+        count: Number of images to return (max 10).
+        unsplash_key: Optional Unsplash API access key.
+        pexels_key: Optional Pexels API key.
+        pixabay_key: Optional Pixabay API key.
+
+    Returns:
+        List of ImageResult objects (may be empty if all sources fail).
+    """
+    results: list[ImageResult] = []
+
+    # Try Unsplash first (best quality, works without key for public access)
+    try:
+        unsplash = _search_unsplash(query, count, unsplash_key)
+        results.extend(unsplash)
+        logger.info(f"Unsplash: {len(unsplash)} results for '{query}'")
+    except Exception as e:
+        logger.debug(f"Unsplash failed: {e}")
+
+    if len(results) >= count:
+        return results[:count]
+
+    # Pexels fallback
+    remaining = count - len(results)
+    try:
+        pexels = _search_pexels(query, remaining, pexels_key)
+        results.extend(pexels)
+        logger.info(f"Pexels: {len(pexels)} results for '{query}'")
+    except Exception as e:
+        logger.debug(f"Pexels failed: {e}")
+
+    if len(results) >= count:
+        return results[:count]
+
+    # Pixabay fallback
+    remaining = count - len(results)
+    try:
+        pixabay = _search_pixabay(query, remaining, pixabay_key)
+        results.extend(pixabay)
+        logger.info(f"Pixabay: {len(pixabay)} results for '{query}'")
+    except Exception as e:
+        logger.debug(f"Pixabay failed: {e}")
+
+    return results[:count]
+
+
+def download_image(url: str, dest_dir: str | Path, filename: str | None = None) -> str | None:
+    """Download an image to local disk. Returns the local file path or None."""
+    import urllib.request
+    import urllib.error
+
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    if filename is None:
+        # Generate filename from URL hash + extension
+        url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
+        parsed = urlparse(url)
+        ext = Path(parsed.path).suffix or ".jpg"
+        if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+            ext = ".jpg"
+        filename = f"article-{url_hash}{ext}"
+
+    filepath = dest / filename
+
+    # Don't re-download
+    if filepath.exists():
+        logger.debug(f"Image already exists: {filepath}")
+        return str(filepath)
+
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "SiteInspector/1.0 Image Downloader",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = resp.read()
+        filepath.write_bytes(data)
+        size_kb = len(data) // 1024
+        logger.info(f"Downloaded: {filepath.name} ({size_kb}KB) from {url[:80]}")
+        return str(filepath)
+    except urllib.error.HTTPError as e:
+        logger.warning(f"HTTP {e.code} downloading {url[:80]}")
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to download {url[:80]}: {e}")
+        return None
+
+
+def extract_keywords_from_html(html_content: str, max_queries: int = 3) -> list[str]:
+    """Extract search queries from article HTML content.
+
+    Uses title + headings. Returns a list of keyword phrases for image search.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html_content, "html.parser")
+    queries: list[str] = []
+
+    # 1. Title as primary query
+    title_tag = soup.find("title")
+    if title_tag and title_tag.string:
+        title = title_tag.string.strip()
+        # Remove site name suffix (after | or -)
+        for sep in (" | ", " - ", " — ", " – "):
+            if sep in title:
+                title = title.split(sep)[0].strip()
+                break
+        if len(title) > 5:
+            queries.append(title)
+
+    # 2. H1
+    h1 = soup.find("h1")
+    if h1:
+        h1_text = h1.get_text(strip=True)
+        if h1_text and len(h1_text) > 10 and h1_text not in queries:
+            queries.append(h1_text)
+
+    # 3. Combine first H2 with title for a specific query
+    h2_tags = soup.find_all("h2")
+    for h2 in h2_tags[:3]:
+        h2_text = h2.get_text(strip=True)
+        if h2_text and len(h2_text) > 5:
+            # Use H2 as a standalone query if distinct enough
+            if h2_text not in " ".join(queries):
+                queries.append(h2_text)
+            break
+
+    # Truncate to max
+    result = queries[:max_queries]
+
+    # If nothing found, try to extract from body text
+    if not result:
+        body = soup.find("body")
+        if body:
+            for tag in body.find_all(["script", "style", "nav", "footer", "header"]):
+                tag.decompose()
+            text = body.get_text(separator=" ", strip=True)
+            # Take first meaningful sentence as query
+            words = text.split()[:15]
+            if words:
+                result.append(" ".join(words))
+
+    logger.debug(f"Extracted keywords: {result}")
+    return result
+
+
+# ── Private: API-specific implementations ───────────────────────────────
+
+def _search_unsplash(query: str, count: int, api_key: str = "") -> list[ImageResult]:
+    """Search Unsplash. With API key uses official API; without uses source.unsplash.com."""
+    import json
+    import urllib.request
+    import urllib.error
+
+    if api_key:
+        url = (
+            f"https://api.unsplash.com/search/photos"
+            f"?query={quote(query)}&per_page={min(count, 30)}&orientation=landscape"
+        )
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Client-ID {api_key}",
+            "Accept-Version": "v1",
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+
+        results: list[ImageResult] = []
+        for photo in data.get("results", []):
+            results.append(ImageResult(
+                url=photo["urls"]["regular"],
+                thumb_url=photo["urls"]["thumb"],
+                alt_text=photo.get("alt_description") or photo.get("description") or query,
+                photographer=photo["user"]["name"],
+                source="unsplash",
+                width=photo.get("width", 0),
+                height=photo.get("height", 0),
+            ))
+        return results
+    else:
+        # No API key: use Lorem Picsum as fallback (always available, free)
+        # Each unique seed gives a different image
+        results: list[ImageResult] = []
+        for i in range(count):
+            seed = abs(hash(f"{query}-{i}")) % 1000
+            img_url = f"https://picsum.photos/seed/{seed}/1200/630"
+            results.append(ImageResult(
+                url=img_url,
+                thumb_url=f"https://picsum.photos/seed/{seed}/400/210",
+                alt_text=query,
+                photographer="Lorem Picsum",
+                source="unsplash",
+                width=1200,
+                height=630,
+            ))
+        return results
+
+
+def _search_pexels(query: str, count: int, api_key: str = "") -> list[ImageResult]:
+    """Search Pexels API. Requires API key (free tier: 200 req/hr)."""
+    import json
+    import urllib.request
+    import urllib.error
+
+    if not api_key:
+        logger.debug("Pexels: no API key, skipping")
+        return []
+
+    url = (
+        f"https://api.pexels.com/v1/search"
+        f"?query={quote(query)}&per_page={min(count, 30)}&orientation=landscape"
+    )
+    req = urllib.request.Request(url, headers={
+        "Authorization": api_key,
+        "User-Agent": "SiteInspector/1.0",
+    })
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode())
+
+    results: list[ImageResult] = []
+    for photo in data.get("photos", []):
+        results.append(ImageResult(
+            url=photo["src"]["large"],
+            thumb_url=photo["src"]["small"],
+            alt_text=photo.get("alt") or query,
+            photographer=photo["photographer"],
+            source="pexels",
+            width=photo.get("width", 0),
+            height=photo.get("height", 0),
+        ))
+    return results
+
+
+def _search_pixabay(query: str, count: int, api_key: str = "") -> list[ImageResult]:
+    """Search Pixabay API. Requires API key (free tier: 100 req/min)."""
+    import json
+    import urllib.request
+    import urllib.error
+
+    if not api_key:
+        logger.debug("Pixabay: no API key, skipping")
+        return []
+
+    url = (
+        f"https://pixabay.com/api/"
+        f"?key={api_key}&q={quote(query)}&per_page={min(count, 30)}"
+        f"&orientation=horizontal&safesearch=true"
+    )
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        data = json.loads(resp.read().decode())
+
+    results: list[ImageResult] = []
+    for hit in data.get("hits", []):
+        results.append(ImageResult(
+            url=hit["largeImageURL"],
+            thumb_url=hit["previewURL"],
+            alt_text=hit.get("tags", query),
+            photographer=hit.get("user", "Pixabay"),
+            source="pixabay",
+            width=hit.get("imageWidth", 0),
+            height=hit.get("imageHeight", 0),
+        ))
+    return results

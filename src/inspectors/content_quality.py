@@ -68,6 +68,27 @@ class ContentQualityInspector(BaseInspector):
                 raw_metadata={"word_count": word_count},
             ))
 
+        # Check for blog articles with no images
+        image_count = len(soup.find_all("img"))
+        is_blog = "/blog/" in url.lower() or "/insights/" in url.lower()
+        if is_blog and word_count >= 200 and image_count == 0:
+            findings.append(RawFinding(
+                url=url, inspector=self.inspector_name,
+                category="article_no_images",
+                description=(
+                    f"Blog article has no images ({word_count} words, 0 images). "
+                    f"Articles with relevant images get 94% more views, "
+                    f"higher engagement, and better search rankings."
+                ),
+                current_value="0 images",
+                suggested_value=(
+                    "Add 2-3 relevant images (hero image + section illustrations). "
+                    "Use free image APIs (Unsplash, Pexels, Pixabay) to find "
+                    "high-quality photos matching the article topic."
+                ),
+                raw_metadata={"word_count": word_count, "image_count": 0},
+            ))
+
         # Readability assessment
         if word_count >= 50:
             readability = assess_readability(text, language)

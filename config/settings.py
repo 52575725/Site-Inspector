@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-chat"
     deepseek_timeout: int = 120
 
+    # Free Image APIs (optional — improves rate limits for article image search)
+    unsplash_api_key: str = ""
+    pexels_api_key: str = ""
+    pixabay_api_key: str = ""
+
     # Crawling
     crawl_rate: float = 0.5
     crawl_max_concurrent: int = 3

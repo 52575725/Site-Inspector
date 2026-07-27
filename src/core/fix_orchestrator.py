@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import Settings
 from src.ai.ollama_client import OllamaClient
 from src.fixers.alt_text_generator import AltTextGenerator
+from src.fixers.article_image_fixer import ArticleImageFixer
 from src.fixers.base import BaseFixer
 from src.fixers.breadcrumb_fixer import BreadcrumbFixer
 from src.fixers.canonical_fixer import CanonicalFixer
@@ -97,6 +98,11 @@ class FixOrchestrator:
                             deepseek_api_key=settings.deepseek_api_key,
                             deepseek_model=settings.deepseek_model),
             ImageOptimizer(),
+            ArticleImageFixer(
+                unsplash_key=settings.unsplash_api_key,
+                pexels_key=settings.pexels_api_key,
+                pixabay_key=settings.pixabay_api_key,
+            ),
             LinkFixer(),
             HreflangFixer(languages=languages),
             HTagRestructurer(ollama=ollama),
