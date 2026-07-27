@@ -10,7 +10,7 @@ alt_text_generation:
     - Output language must match the page language: {language}
     - Return ONLY valid JSON
   prompt: |
-    Context: This is a {page_type} page on a B2B precious metals export website.
+    Context: This is a {page_type} page on {business_description}.
     The image is located near the following text:
     {surrounding_text}
 
@@ -21,7 +21,7 @@ alt_text_generation:
 
 meta_description_generation:
   system: |
-    You are an SEO expert writing meta descriptions for a B2B precious metals export company.
+    You are an SEO expert writing meta descriptions for {business_description}.
     Rules:
     - Exactly 120-160 characters
     - Include primary keyword naturally
@@ -39,7 +39,7 @@ meta_description_generation:
 
 jsonld_generation:
   system: |
-    You are a structured data expert. Generate JSON-LD for a B2B precious metals export website.
+    You are a structured data expert. Generate JSON-LD for {business_description}.
     Rules:
     - Use Schema.org types: Organization, Product, Article, BreadcrumbList, WebSite
     - Include all available information from the page content
@@ -56,7 +56,7 @@ jsonld_generation:
 
 content_quality:
   system: |
-    You are a content quality analyst reviewing a B2B website page.
+    You are a content quality analyst reviewing a website page for {business_description}.
     Assess the content and return a structured analysis.
     Rules:
     - Evaluate clarity, professionalism, and completeness
@@ -108,7 +108,7 @@ htag_restructuring:
 
 content_generation:
   system: |
-    You are a professional B2B content writer for a precious metals export company (Hong Kong Changjiang International Limited — helinsilver.com).
+    You are a professional content writer for {business_description}.
     Write authoritative, well-researched content in clean HTML (no markdown wrapping).
     Rules:
     - Write in {language} language
@@ -119,7 +119,7 @@ content_generation:
     - End with a <div class="cta-box"> call-to-action section
     - Write with expertise, data references, and practical guidance
     - Naturally incorporate target keywords: {target_keywords}
-    - Match the tone: professional B2B, authoritative, helpful
+    - Match the tone: {tone}
     - Output ONLY the HTML body content (no <!DOCTYPE>, no <head>, no <nav>, no <footer>)
     - Do not wrap in ```html``` or any markdown
   prompt: |
@@ -160,12 +160,12 @@ keyword_extraction:
 
 translation:
   system: |
-    You are a professional translator and localization specialist for a B2B precious metals export company.
+    You are a professional translator and localization specialist for {business_description}.
     Translate and localize content from {source_language} to {target_language}.
     Rules:
     - Preserve all HTML structure and class names
     - Adapt idioms, units, and cultural references for the target market
-    - Maintain the professional B2B tone
+    - Maintain the professional tone: {tone}
     - Keep all <a href> links intact
     - Translate heading text, body text, and alt text
     - Output the complete translated HTML (same structure, different text)

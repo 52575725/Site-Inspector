@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -295,54 +296,150 @@ def _search_wikimedia(query: str, count: int) -> list[ImageResult]:
     import re
     import urllib.request
 
-    url = (
-        "https://commons.wikimedia.org/w/api.php?action=query&generator=search"
-        f"&gsrsearch={quote('file:' + query)}&gsrnamespace=6&gsrlimit={min(max(count * 3, 6), 30)}"
-        "&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=1200"
-        "&format=json&origin=*"
-    )
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "SiteInspector/1.0 (article image research)",
-    })
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-
     results = []
-    pages = data.get("query", {}).get("pages", {})
-    for page in pages.values():
-        info_list = page.get("imageinfo") or []
-        if not info_list:
-            continue
-        info = info_list[0]
-        if info.get("mime") not in {"image/jpeg", "image/png", "image/webp"}:
-            continue
-        metadata = info.get("extmetadata") or {}
+    seen_urls = set()
+    query_variants = _wikimedia_query_variants(query)
+    visual_intent = query_variants[0]
+    for search_query in query_variants:
+        url = (
+            "https://commons.wikimedia.org/w/api.php?action=query&generator=search"
+            f"&gsrsearch={quote('file:' + search_query)}&gsrnamespace=6"
+            f"&gsrlimit={min(max(count * 6, 12), 40)}"
+            "&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=1200"
+            "&format=json&origin=*"
+        )
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "SiteInspector/1.0 (article image research)",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
 
-        def meta(name: str) -> str:
-            value = metadata.get(name, {}).get("value", "")
-            value = re.sub(r"<[^>]+>", " ", value)
-            return " ".join(html.unescape(value).split())
+        pages = data.get("query", {}).get("pages", {})
+        for page in pages.values():
+            info_list = page.get("imageinfo") or []
+            if not info_list:
+                continue
+            info = info_list[0]
+            if info.get("mime") not in {"image/jpeg", "image/png", "image/webp"}:
+                continue
+            image_url = info.get("thumburl") or info.get("url", "")
+            key = image_url.split("?", 1)[0]
+            if not image_url or key in seen_urls:
+                continue
+            metadata = info.get("extmetadata") or {}
 
-        title = page.get("title", "").removeprefix("File:")
-        description = meta("ImageDescription") or title or query
-        license_name = meta("LicenseShortName") or meta("UsageTerms")
-        if not license_name:
-            continue
-        results.append(ImageResult(
-            url=info.get("thumburl") or info.get("url", ""),
-            thumb_url=info.get("thumburl") or info.get("url", ""),
-            alt_text=description[:180],
-            photographer=meta("Artist") or "Wikimedia Commons contributor",
-            source="wikimedia",
-            width=info.get("thumbwidth", 0),
-            height=info.get("thumbheight", 0),
-            page_url=f"https://commons.wikimedia.org/?curid={page.get('pageid', '')}",
-            license_name=license_name,
-            license_url=metadata.get("LicenseUrl", {}).get("value", ""),
-        ))
-        if len(results) >= count:
-            break
+            def meta(name: str) -> str:
+                value = metadata.get(name, {}).get("value", "")
+                value = re.sub(r"<[^>]+>", " ", value)
+                return " ".join(html.unescape(value).split())
+
+            title = page.get("title", "").removeprefix("File:")
+            description = meta("ImageDescription") or title or search_query
+            categories = meta("Categories")
+            if not _matches_visual_intent(visual_intent, title, description, categories):
+                continue
+            license_name = meta("LicenseShortName") or meta("UsageTerms")
+            if not license_name:
+                continue
+            seen_urls.add(key)
+            results.append(ImageResult(
+                url=image_url,
+                thumb_url=image_url,
+                alt_text=description[:180],
+                photographer=meta("Artist") or "Wikimedia Commons contributor",
+                source="wikimedia",
+                width=info.get("thumbwidth", 0),
+                height=info.get("thumbheight", 0),
+                page_url=f"https://commons.wikimedia.org/?curid={page.get('pageid', '')}",
+                license_name=license_name,
+                license_url=metadata.get("LicenseUrl", {}).get("value", ""),
+            ))
+            if len(results) >= count:
+                return results
     return results
+
+
+def _wikimedia_query_variants(query: str) -> list[str]:
+    """Create progressively broader visual queries for long editorial headings."""
+    words = re.findall(r"[A-Za-z0-9]+|[\u3040-\u30ff\u3400-\u9fff]+", query)
+    if not words:
+        return [query]
+    stopwords = {
+        "a", "an", "and", "are", "as", "at", "complete", "conclusion",
+        "delivery", "explained", "for", "from", "good", "guide", "how",
+        "in", "introduction", "is", "list", "of", "on", "quality", "standards",
+        "specifications", "the", "to", "understanding", "what", "why", "with",
+    }
+    compact = [word for word in words if word.lower() not in stopwords and not word.isdigit()]
+    without_acronyms = [word for word in compact if not (word.isupper() and len(word) > 1)]
+    visual_query = _visual_query_for(query)
+    variants = [visual_query, query]
+    if compact:
+        variants.append(" ".join(compact[:5]))
+    if without_acronyms:
+        variants.append(" ".join(without_acronyms[:4]))
+        if len(without_acronyms) > 2:
+            variants.append(" ".join(without_acronyms[-2:]))
+    return list(dict.fromkeys(value.strip() for value in variants if value.strip()))
+
+
+def _visual_query_for(query: str) -> str:
+    """Map editorial language to a concrete subject that can be photographed."""
+    lowered = query.lower()
+    if any(term in lowered for term in ("solar", "photovoltaic")):
+        return "solar panels industry"
+    if any(term in lowered for term in ("air freight", "air cargo", "airport")):
+        return "cargo aircraft freight"
+    if any(term in lowered for term in ("sea freight", "ocean freight", "container ship")):
+        return "container ship cargo"
+    if any(term in lowered for term in ("customs", "import", "export", "tariff")):
+        return "customs cargo inspection"
+    if any(term in lowered for term in ("shipping", "logistics", "freight")):
+        return "international cargo freight"
+    if any(term in lowered for term in ("mine", "mining", "geological", "origin")):
+        return "silver mining"
+    if any(term in lowered for term in ("jewelry", "jewellery", "ring", "necklace")):
+        return "silver jewelry"
+    if any(term in lowered for term in (
+        "price", "pricing", "market", "benchmark", "futures", "inventory", "etf",
+    )):
+        return "silver price chart"
+    if any(term in lowered for term in (
+        "lbma", "bullion", "ingot", "silver bar", "assay", "refinery", "purity",
+    )):
+        return "silver bullion ingot"
+    if "silver" in lowered:
+        return "silver bullion ingot"
+    return ""
+
+
+def _matches_visual_intent(
+    search_query: str,
+    title: str,
+    description: str,
+    categories: str,
+) -> bool:
+    """Reject obvious homonyms before an image reaches editorial review."""
+    query = search_query.lower()
+    candidate = f"{title} {description} {categories}".lower()
+    if "silver" in query and "silver" not in candidate:
+        return False
+    if any(term in query for term in ("bullion", "ingot")):
+        return any(term in candidate for term in ("bullion", "ingot"))
+    intent_groups = (
+        (("solar", "panel"), ("solar", "photovoltaic", "panel")),
+        (("aircraft",), ("aircraft", "airplane", "aeroplane", "air cargo")),
+        (("container", "ship"), ("container", "cargo ship", "container ship")),
+        (("customs",), ("customs", "cargo", "freight")),
+        (("cargo", "freight"), ("cargo", "freight", "logistics")),
+        (("mining",), ("mine", "mining", "ore")),
+        (("jewelry",), ("jewelry", "jewellery", "ring", "necklace")),
+        (("price", "chart"), ("price", "chart", "market graph")),
+    )
+    for query_terms, candidate_terms in intent_groups:
+        if any(term in query for term in query_terms):
+            return any(term in candidate for term in candidate_terms)
+    return True
 
 
 def _search_pixabay(query: str, count: int, api_key: str = "") -> list[ImageResult]:

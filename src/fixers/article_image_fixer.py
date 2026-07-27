@@ -245,7 +245,11 @@ class ArticleImageFixer(BaseFixer):
             )
 
         # Insert images into article
-        modified_count = self._insert_images(soup, downloaded[:needed])
+        modified_count = self._insert_images(
+            soup,
+            downloaded[:needed],
+            include_hero=not existing_images,
+        )
 
         if modified_count == 0:
             return FixResult(
@@ -284,7 +288,12 @@ class ArticleImageFixer(BaseFixer):
             diff=diff[:5000],
         )
 
-    def _insert_images(self, soup: BeautifulSoup, images: list[dict]) -> int:
+    def _insert_images(
+        self,
+        soup: BeautifulSoup,
+        images: list[dict],
+        include_hero: bool = True,
+    ) -> int:
         """Insert images at natural positions in the article body.
 
         Strategy:
@@ -300,7 +309,7 @@ class ArticleImageFixer(BaseFixer):
         self._ensure_image_styles(soup)
 
         # Image 1: after the introduction, not between the H1 and its lead text.
-        if images:
+        if images and include_hero:
             h1 = main.find("h1")
             intro = h1.find_next("p") if h1 else main.find("p")
             anchor = intro or h1
@@ -314,11 +323,12 @@ class ArticleImageFixer(BaseFixer):
             inserted += 1
 
         # Remaining images: spread across the article's H2 sections.
-        if len(images) > 1:
+        remaining_images = images[1:] if include_hero else images
+        if remaining_images:
             h2_tags = main.find_all("h2")
-            remaining = len(images) - 1
+            remaining = len(remaining_images)
             anchors = self._distributed_anchors(main, h2_tags, remaining)
-            for image, anchor in zip(images[1:], anchors):
+            for image, anchor in zip(remaining_images, anchors):
                 figure = BeautifulSoup(
                     self._build_figure_tag(image, is_hero=False), "html.parser",
                 )

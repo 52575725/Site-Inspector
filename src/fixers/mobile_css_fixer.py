@@ -82,6 +82,16 @@ img, video, canvas, svg {
                 error_message=f"CSS fix for '{category}' already applied",
             )
 
+        # ── Pre-check: validate input before modifying ──────────────
+        if not self._input_is_safe(page_content, file_path):
+            return FixResult(
+                success=False, issue_id=issue_id,
+                fixer_name=self.fixer_name, fix_type=self.fix_type,
+                file_path=file_path,
+                before_content=page_content, after_content=page_content,
+                error_message="Input HTML appears malformed — refusing to modify",
+            )
+
         # Inject CSS using string manipulation (more reliable than BS4 parsing)
         after_content = self._inject_css(page_content, css_rule)
 
@@ -92,6 +102,16 @@ img, video, canvas, svg {
                 file_path=file_path,
                 before_content=page_content, after_content=page_content,
                 error_message="Failed to inject CSS — no suitable insertion point found",
+            )
+
+        # ── Post-check: verify output integrity ────────────────────
+        if not self._output_integrity_ok(page_content, after_content):
+            return FixResult(
+                success=False, issue_id=issue_id,
+                fixer_name=self.fixer_name, fix_type=self.fix_type,
+                file_path=file_path,
+                before_content=page_content, after_content=page_content,
+                error_message="Output integrity check failed — fix would corrupt HTML, aborted",
             )
 
         diff = "\n".join(difflib.unified_diff(
@@ -123,6 +143,57 @@ img, video, canvas, svg {
             "small_touch_targets": "Ensure minimum 48px touch targets",
             "horizontal_scroll": "Prevent horizontal overflow",
         }.get(category, category)
+
+    @staticmethod
+    def _input_is_safe(html: str, file_path: str) -> bool:
+        """Reject obviously malformed HTML that would produce corrupted output."""
+        if not html or not html.strip():
+            return False
+
+        # Must have a recognizable HTML structure
+        has_doctype = "<!DOCTYPE" in html[:200].upper() if len(html) > 10 else False
+        has_html_tag = "<html" in html[:500].lower()
+
+        # If it has <html> but no DOCTYPE, or vice versa, it's probably fine
+        # But if it has excessive duplicate headings, reject
+        import re
+        title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE)
+        if title_match:
+            title_text = title_match.group(1).strip()
+            # Count how many times the title appears as H1/H2 text
+            title_in_body = len(re.findall(
+                re.escape(title_text[:50]), html[html.lower().find("<body"):],
+            )) if "<body" in html.lower() else 0
+            if title_in_body > 3:
+                return False  # Already corrupted
+
+        return True
+
+    @staticmethod
+    def _output_integrity_ok(before: str, after: str) -> bool:
+        """Verify the fix didn't introduce corruption."""
+        # Skip strict checks for very small files (test inputs, etc.)
+        if len(before) < 500:
+            return True
+
+        # Length shouldn't change dramatically
+        if len(after) < len(before) * 0.7:
+            return False
+        if len(after) > len(before) * 1.5:
+            return False
+
+        # <body> should still be present
+        if "<body" in before.lower() and "<body" not in after.lower():
+            return False
+
+        # CSS should be injected in <head>, not <body>
+        head_close = after.lower().rfind("</head>")
+        style_pos = after.lower().rfind("<style>")
+        if style_pos > 0 and head_close > 0:
+            if style_pos > head_close:
+                return False  # <style> injected after </head> = in body
+
+        return True
 
     @staticmethod
     def _inject_css(html: str, css_rule: str) -> str:

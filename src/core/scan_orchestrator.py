@@ -13,6 +13,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import Settings
+from src.ai.deepseek_client import DeepSeekClient
 from src.ai.ollama_client import OllamaClient
 from src.ai.prompt_manager import PromptManager
 from src.crawler.crawler import Crawler
@@ -21,6 +22,7 @@ from src.inspectors.base import RawFinding
 from src.inspectors.broken_links import BrokenLinksInspector
 from src.inspectors.cannibalization import CannibalizationDetector
 from src.inspectors.competitor_gap import CompetitorGapInspector
+from src.inspectors.content_clustering import ContentClusterInspector
 from src.inspectors.content_freshness import ContentFreshnessInspector
 from src.inspectors.content_gap import ContentGapDetector
 from src.inspectors.content_quality import ContentQualityInspector
@@ -30,10 +32,12 @@ from src.inspectors.headers import HeadersInspector
 from src.inspectors.image_seo import ImageSEOInspector
 from src.inspectors.js_seo import JSSeoInspector
 from src.inspectors.keyword_analyzer import KeywordAnalyzer
+from src.inspectors.link_graph import LinkGraphInspector
 from src.inspectors.mobile import MobileInspector
 from src.inspectors.robots_txt import RobotsTxtInspector
 from src.inspectors.performance import PerformanceInspector
 from src.inspectors.platform_seo import PlatformSEOInspector
+from src.inspectors.semantic_content import SemanticContentInspector
 from src.inspectors.seo import SEOInspector
 from src.inspectors.sitemap import SitemapInspector
 from src.inspectors.structured_data import StructuredDataValidator
@@ -55,11 +59,15 @@ class ScanOrchestrator:
     """Orchestrates a full scan: crawl → inspect → save."""
 
     def __init__(self, settings: Settings, session: AsyncSession,
-                 ollama: Optional[OllamaClient] = None):
+                 ollama: Optional[OllamaClient] = None,
+                 deepseek: Optional[DeepSeekClient] = None):
         self.settings = settings
         self.session = session
         self.ollama = ollama
-        self.prompts = PromptManager()
+        self.deepseek = deepseek
+        target_config = self.settings.__class__.load_target(settings.target_name)
+        business_config = target_config.get("business", {})
+        self.prompts = PromptManager(business_config=business_config)
 
         # Repositories
         self.target_repo = TargetRepository(session)
@@ -105,7 +113,9 @@ class ScanOrchestrator:
         await self.session.commit()
 
         # 3. Crawl all pages
-        crawler = Crawler(self.settings, base_url=_base_url)
+        target_crawl_config = target_config.get("crawl", {})
+        use_browser = target_crawl_config.get("use_browser", False)
+        crawler = Crawler(self.settings, base_url=_base_url, use_browser=use_browser)
         try:
             discovered = await crawler.discover_pages()
             if not discovered:
@@ -242,12 +252,36 @@ class ScanOrchestrator:
         for r in results:
             all_findings.extend(r)
 
-        # Teardown inspectors
+        # Teardown inspectors and collect cross-page findings
         for insp in inspectors:
             try:
                 await insp.teardown()
             except Exception as e:
                 logger.warning(f"Failed to teardown {insp.inspector_name}: {e}", exc_info=True)
+
+            # Collect cross-page findings from cluster inspector
+            if isinstance(insp, ContentClusterInspector):
+                try:
+                    cluster_findings = insp.get_findings()
+                    all_findings.extend(cluster_findings)
+                    logger.info(
+                        f"ContentClusterInspector produced {len(cluster_findings)} "
+                        f"cross-page findings"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to collect cluster findings: {e}")
+
+            # Collect cross-page findings from link graph inspector
+            if isinstance(insp, LinkGraphInspector):
+                try:
+                    graph_findings = insp.get_findings()
+                    all_findings.extend(graph_findings)
+                    logger.info(
+                        f"LinkGraphInspector produced {len(graph_findings)} "
+                        f"cross-page findings"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to collect link graph findings: {e}")
 
         await http_client.aclose()
 
@@ -346,10 +380,15 @@ class ScanOrchestrator:
         http_client = httpx.AsyncClient(timeout=15, follow_redirects=False)
         target_config = self.settings.__class__.load_target(self.settings.target_name)
         competitor_urls = target_config.get("competitors", [])
+        business_config = target_config.get("business", {})
         return [
             SEOInspector(),
             BrokenLinksInspector(client=http_client),
-            CompetitorGapInspector(competitor_urls=competitor_urls),
+            CompetitorGapInspector(
+                competitor_urls=competitor_urls,
+                deepseek=self.deepseek,
+                business_config=business_config,
+            ),
             HeadersInspector(),
             CannibalizationDetector(),
             JSSeoInspector(),
@@ -367,11 +406,15 @@ class ScanOrchestrator:
             ),
             ContentFreshnessInspector(),
             SitemapInspector(),
-            StructuredDataValidator(),
+            StructuredDataValidator(),  # field value validation is built-in, no AI required
             ContentGapDetector(),
-            KeywordAnalyzer(),
-            ImageSEOInspector(),
+            KeywordAnalyzer(deepseek=self.deepseek),
+            ImageSEOInspector(ollama=self.ollama),
             URLAuditor(),
             RobotsTxtInspector(),
             PlatformSEOInspector(),
+            # ── New AI-powered / graph inspectors ─────────────────
+            SemanticContentInspector(deepseek=self.deepseek),
+            ContentClusterInspector(ollama=self.ollama),
+            LinkGraphInspector(),
         ]

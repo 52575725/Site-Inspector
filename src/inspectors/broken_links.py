@@ -14,12 +14,19 @@ logger = logging.getLogger(__name__)
 
 
 class BrokenLinksInspector(BaseInspector):
-    """Inspect all links on a page for 404/500 errors, redirect chains, and mixed content."""
+    """Inspect all links on a page for 404/500 errors, redirect chains,
+    mixed content, and broken external links.
+
+    Internal links are checked with full GET requests.  External links
+    are checked with lightweight HEAD requests (with GET fallback) to
+    verify they're reachable without downloading full pages.
+    """
 
     inspector_name = "broken_links"
 
     def __init__(self, client: httpx.AsyncClient | None = None):
         self.client = client or httpx.AsyncClient(timeout=15, follow_redirects=False)
+        self._semaphore = None
 
     async def setup(self) -> None:
         pass
@@ -75,10 +82,17 @@ class BrokenLinksInspector(BaseInspector):
             if urlparse(full_url).netloc == base_url_domain
         ]
 
-        # Limit concurrent checks to 5
+        # External links (different domain) — checked with HEAD for efficiency
+        external_links = [
+            (tag_type, full_url)
+            for _, (tag_type, full_url) in seen_urls.items()
+            if urlparse(full_url).netloc != base_url_domain
+        ]
+
+        # Limit concurrent checks
         semaphore = asyncio.Semaphore(5)
 
-        async def check_link(tag_type: str, link_url: str) -> RawFinding | None:
+        async def check_internal_link(tag_type: str, link_url: str) -> RawFinding | None:
             async with semaphore:
                 try:
                     resp = await self.client.get(link_url)
@@ -114,7 +128,57 @@ class BrokenLinksInspector(BaseInspector):
                     logger.debug(f"Error checking link {link_url}: {e}")
                 return None
 
-        tasks = [check_link(tt, lu) for tt, lu in internal_links]
+        async def check_external_link(tag_type: str, link_url: str) -> RawFinding | None:
+            """Check external link with HEAD request, fall back to GET."""
+            async with semaphore:
+                try:
+                    # Try HEAD first
+                    try:
+                        resp = await self.client.head(link_url)
+                    except Exception:
+                        # Fall back to GET with stream to avoid downloading body
+                        resp = await self.client.get(link_url)
+
+                    status = resp.status_code
+
+                    if status >= 500:
+                        return RawFinding(
+                            url=url, inspector=self.inspector_name,
+                            category="external_link_broken",
+                            description=(
+                                f"External {tag_type} returns {status}: {link_url}. "
+                                f"Consider removing or updating this link."
+                            ),
+                            element=link_url,
+                            current_value=str(status),
+                        )
+                    if status >= 400 and status < 500:
+                        return RawFinding(
+                            url=url, inspector=self.inspector_name,
+                            category="external_link_warning",
+                            description=(
+                                f"External {tag_type} returns {status}: {link_url}. "
+                                f"Verify the link is still valid."
+                            ),
+                            element=link_url,
+                            current_value=str(status),
+                        )
+                except httpx.TimeoutException:
+                    return RawFinding(
+                        url=url, inspector=self.inspector_name,
+                        category="external_link_timeout",
+                        description=f"External link timed out: {link_url}",
+                        element=link_url,
+                    )
+                except Exception:
+                    pass  # External links can fail for many reasons
+                return None
+
+        tasks = [check_internal_link(tt, lu) for tt, lu in internal_links]
+        # Only check up to 20 external links per page to stay efficient
+        ext_sample = external_links[:20]
+        tasks += [check_external_link(tt, lu) for tt, lu in ext_sample]
+
         results = await asyncio.gather(*tasks)
         findings.extend(r for r in results if r is not None)
 

@@ -17,7 +17,8 @@ LEGACY_FORMATS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff"}
 
 class ImageSEOInspector(BaseInspector):
     """Detects image SEO issues: missing dimensions, no lazy loading,
-    legacy formats (no WebP), missing alt text, and large inline images.
+    legacy formats (no WebP), missing alt text, large inline images,
+    and (optionally) AI-assessed alt text quality.
     """
 
     inspector_name = "image_seo"
@@ -25,8 +26,13 @@ class ImageSEOInspector(BaseInspector):
     # Images above the fold (first image, images in header) should NOT be lazy-loaded
     ABOVE_FOLD_POSITION = 3  # First 3 images on page are considered above-fold
 
+    def __init__(self, ollama=None):
+        super().__init__()
+        self.ollama = ollama
+        self._ollama_available: bool | None = None
+
     async def setup(self) -> None:
-        pass
+        self._ollama_available = None
 
     async def teardown(self) -> None:
         pass
@@ -74,6 +80,11 @@ class ImageSEOInspector(BaseInspector):
                     current_value="(empty)",
                     suggested_value="Add descriptive alt text or role='presentation'",
                 ))
+            elif alt and len(alt.strip()) > 3:
+                # Check alt text quality
+                quality = await self._check_alt_quality(src, alt, url)
+                if quality:
+                    findings.append(quality)
 
             # Check 2: Missing width/height attributes (CLS prevention)
             width = img.get("width")
@@ -142,3 +153,83 @@ class ImageSEOInspector(BaseInspector):
                 ))
 
         return findings
+
+    async def _check_alt_quality(
+        self, src: str, alt: str, url: str,
+    ) -> RawFinding | None:
+        """Check alt text quality with basic heuristics.
+
+        Flags: generic phrases, keyword-stuffed alt text, file-name-as-alt,
+        and excessively long alt text.
+        """
+        import re
+        alt_clean = alt.strip()
+        alt_lower = alt_clean.lower()
+
+        # File-name-as-alt detection
+        looks_like_filename = bool(re.match(
+            r'^[a-z0-9_\-./]+\.[a-z]{3,4}$', alt_clean, re.IGNORECASE
+        ))
+        if looks_like_filename:
+            return RawFinding(
+                url=url, inspector=self.inspector_name,
+                category="image_alt_is_filename",
+                description=(
+                    f"Alt text appears to be a filename: '{alt_clean[:80]}' "
+                    f"for src='{src[:80]}'"
+                ),
+                element=f"img[src='{src[:80]}']",
+                current_value=alt_clean[:100],
+                suggested_value="Replace with a human-readable description",
+            )
+
+        # Generic placeholder phrases
+        generic_phrases = [
+            "image", "picture", "photo", "graphic", "logo", "banner",
+            "placeholder", "spacer", "img", "pic",
+        ]
+        words = set(alt_lower.split())
+        if len(words) == 1 and any(g in words for g in generic_phrases):
+            return RawFinding(
+                url=url, inspector=self.inspector_name,
+                category="image_alt_generic",
+                description=(
+                    f"Alt text is a generic placeholder: '{alt_clean[:80]}' "
+                    f"for src='{src[:80]}'. This provides no SEO or "
+                    f"accessibility value."
+                ),
+                element=f"img[src='{src[:80]}']",
+                current_value=alt_clean[:100],
+                suggested_value="Describe the specific content of this image",
+            )
+
+        # Keyword-stuffed alt text (many commas or repetitive phrases)
+        comma_count = alt_clean.count(",")
+        if comma_count >= 4 and len(alt_clean) > 80:
+            return RawFinding(
+                url=url, inspector=self.inspector_name,
+                category="image_alt_keyword_stuffed",
+                description=(
+                    f"Alt text may be keyword-stuffed ({comma_count} commas, "
+                    f"{len(alt_clean)} chars): '{alt_clean[:100]}'"
+                ),
+                element=f"img[src='{src[:80]}']",
+                current_value=alt_clean[:150],
+                suggested_value="Write a concise, natural description (max 125 chars)",
+            )
+
+        # Overly long alt text
+        if len(alt_clean) > 200:
+            return RawFinding(
+                url=url, inspector=self.inspector_name,
+                category="image_alt_too_long",
+                description=(
+                    f"Alt text is too long ({len(alt_clean)} chars). "
+                    f"Recommended max is 125 chars."
+                ),
+                element=f"img[src='{src[:80]}']",
+                current_value=f"{alt_clean[:100]}...",
+                suggested_value=alt_clean[:125],
+            )
+
+        return None

@@ -37,17 +37,27 @@ class CompetitorGapInspector(BaseInspector):
 
     Fetches competitor pages once per scan, extracts their SEO profile,
     and compares against every crawled page to surface actionable gaps.
+
+    When a DeepSeekClient is provided, also performs AI-powered semantic
+    gap analysis — identifying topics, angles, and data points the
+    competitor covers that your page does not.
     """
 
     inspector_name = "competitor_gap"
 
     def __init__(self, competitor_urls: list[str] | None = None,
-                 timeout: int = 15):
+                 timeout: int = 15,
+                 deepseek=None,
+                 business_config: dict | None = None):
         self.competitor_urls = competitor_urls or []
         self.timeout = timeout
+        self.deepseek = deepseek
+        self.business_config = business_config or {}
         self._competitor_profiles: dict[str, dict] = {}
+        self._competitor_html: dict[str, str] = {}  # raw HTML for AI analysis
         self._page_data: list[dict] = []
         self._fetched = False
+        self._deepseek_available: bool | None = None
 
     async def setup(self) -> None:
         pass
@@ -241,6 +251,12 @@ class CompetitorGapInspector(BaseInspector):
                 },
             ))
 
+        # ── 6. AI-powered semantic gap analysis ──────────────────
+        ai_findings = await self._deep_semantic_compare(
+            url, your_soup, comp_url, comp,
+        )
+        findings.extend(ai_findings)
+
         return findings
 
     # ── Fetch + Profile ──────────────────────────────────────────────
@@ -303,6 +319,7 @@ class CompetitorGapInspector(BaseInspector):
                 try:
                     resp = await client.get(url)
                     resp.raise_for_status()
+                    self._competitor_html[url] = resp.text
                     soup = BeautifulSoup(resp.text, "html.parser")
                     profile = self._extract_profile(url, soup)
                     self._competitor_profiles[url] = profile
@@ -351,6 +368,146 @@ class CompetitorGapInspector(BaseInspector):
                 best_score = score
                 best = (url, cp)
         return best
+
+    # ── AI Semantic Comparison ───────────────────────────────────────
+
+    async def _deep_semantic_compare(
+        self, your_url: str, your_soup: BeautifulSoup,
+        comp_url: str, comp_profile: dict,
+    ) -> list[RawFinding]:
+        """AI-powered semantic gap analysis between our page and competitor.
+
+        Only runs when DeepSeek is configured and available.  Compares the
+        actual body content (not just metadata) to find topics, angles,
+        and data points the competitor covers that we don't.
+        """
+        if self.deepseek is None:
+            return []
+
+        if self._deepseek_available is None:
+            try:
+                self._deepseek_available = await self.deepseek.health_check()
+            except Exception:
+                self._deepseek_available = False
+        if not self._deepseek_available:
+            return []
+
+        # Extract our body text
+        for tag in your_soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        your_text = your_soup.get_text(separator=" ", strip=True)[:4000]
+
+        # Extract competitor body text from stored HTML
+        comp_html = self._competitor_html.get(comp_url, "")
+        comp_text = ""
+        if comp_html:
+            comp_soup = BeautifulSoup(comp_html, "html.parser")
+            for tag in comp_soup(["script", "style", "nav", "footer", "header"]):
+                tag.decompose()
+            comp_text = comp_soup.get_text(separator=" ", strip=True)[:4000]
+
+        if not comp_text:
+            return []
+
+        business_desc = self.business_config.get(
+            "description", "a business website"
+        )
+
+        system = (
+            "You are a competitive content strategist.  Compare two pages "
+            "on the same topic and identify what the competitor covers that "
+            "we don't.  Be specific — name concrete topics, data points, "
+            "and angles.  Return ONLY valid JSON."
+        )
+
+        prompt = (
+            f"Context: {business_desc}\n\n"
+            f"Our page ({your_url}):\n{your_text}\n\n"
+            f"Competitor page ({comp_url}):\n{comp_text}\n\n"
+            f"Return JSON:\n"
+            f'{{\n'
+            f'  "our_strengths": ["..."],\n'
+            f'  "competitor_strengths": ["..."],\n'
+            f'  "topics_competitor_covers_we_dont": [\n'
+            f'    {{"topic": "...", "importance": "high/medium/low", '
+            f'"suggested_approach": "..."}}\n'
+            f'  ],\n'
+            f'  "depth_comparison": "ours_deeper/similar/competitor_deeper",\n'
+            f'  "unique_angles_we_should_add": ["..."],\n'
+            f'  "data_points_competitor_uses": ["..."],\n'
+            f'  "overall_gap_severity": "critical/moderate/minimal"\n'
+            f'}}'
+        )
+
+        try:
+            result = await self.deepseek.generate_json(
+                prompt=prompt, system=system, temperature=0.3, max_tokens=1500,
+            )
+        except Exception as e:
+            logger.debug(f"Semantic competitor comparison failed: {e}")
+            return []
+
+        if result.get("error") or result.get("raw"):
+            return []
+
+        findings: list[RawFinding] = []
+
+        # Critical gap
+        if result.get("overall_gap_severity") == "critical":
+            topics = result.get("topics_competitor_covers_we_dont", [])
+            topic_desc = "; ".join(
+                f"{t.get('topic', '?')} ({t.get('importance', '?')})"
+                for t in topics[:5]
+            )
+            findings.append(RawFinding(
+                url=your_url, inspector=self.inspector_name,
+                category="competitor_semantic_gap_critical",
+                description=(
+                    f"Critical content gap vs competitor ({urlparse(comp_url).netloc}). "
+                    f"Missing topics: {topic_desc}. "
+                    f"Depth: {result.get('depth_comparison', 'unknown')}."
+                ),
+                current_value="significant content gap detected",
+                suggested_value=(
+                    f"Add coverage for: "
+                    f"{', '.join(t.get('topic', '') for t in topics[:5])}"
+                ),
+                raw_metadata=result,
+            ))
+        elif result.get("overall_gap_severity") == "moderate":
+            topics = result.get("topics_competitor_covers_we_dont", [])
+            if topics:
+                findings.append(RawFinding(
+                    url=your_url, inspector=self.inspector_name,
+                    category="competitor_semantic_gap_moderate",
+                    description=(
+                        f"Moderate content gap vs competitor: missing "
+                        f"{len(topics)} topic(s). "
+                        f"Key missing: {topics[0].get('topic', '?') if topics else '?'}"
+                    ),
+                    current_value=f"{len(topics)} topics missing",
+                    suggested_value=(
+                        f"Address gap: {topics[0].get('suggested_approach', '') if topics else ''}"
+                    ),
+                    raw_metadata=result,
+                ))
+
+        # Data point gap
+        data_points = result.get("data_points_competitor_uses", [])
+        if data_points and len(data_points) >= 3:
+            findings.append(RawFinding(
+                url=your_url, inspector=self.inspector_name,
+                category="competitor_data_gap",
+                description=(
+                    f"Competitor uses {len(data_points)} data points/statistics "
+                    f"that your page lacks. Adding data improves credibility."
+                ),
+                current_value="no data points found in your content",
+                suggested_value=f"Add data points like: {', '.join(data_points[:3])}",
+                raw_metadata=result,
+            ))
+
+        return findings
 
     # ── SEO Profile Extraction ───────────────────────────────────────
 

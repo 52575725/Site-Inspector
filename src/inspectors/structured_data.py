@@ -171,6 +171,11 @@ class StructuredDataValidator(BaseInspector):
                             suggested_value=f"{field}: <value>",
                         ))
 
+        # ── 4. Field value quality validation ─────────────────────────
+        for block in parsed_blocks:
+            value_findings = self._validate_field_values(block, url)
+            findings.extend(value_findings)
+
         return findings
 
     @staticmethod
@@ -193,6 +198,175 @@ class StructuredDataValidator(BaseInspector):
         if "/guide" in path or "/how-to" in path or "/tutorial" in path:
             return "howto"
         return "homepage"
+
+    @staticmethod
+    def _validate_field_values(block: dict, url: str) -> list[RawFinding]:
+        """Validate the quality/format of field values (not just presence)."""
+        findings: list[RawFinding] = []
+        import re
+        from urllib.parse import urlparse
+
+        schema_type = block.get("@type", "Unknown")
+
+        # ── URL fields ──────────────────────────────────────────────
+        url_fields = ["url", "sameAs", "logo", "image", "thumbnailUrl"]
+        for field in url_fields:
+            val = block.get(field)
+            if not val:
+                continue
+            if isinstance(val, dict):
+                val = val.get("url") or val.get("@id") or ""
+            if isinstance(val, list):
+                val = val[0] if val else ""
+            if not isinstance(val, str) or not val:
+                continue
+            parsed = urlparse(val)
+            if parsed.scheme not in ("http", "https"):
+                findings.append(RawFinding(
+                    url=url, inspector="structured_data",
+                    category="schema_invalid_url",
+                    description=(
+                        f"Schema '{schema_type}' field '{field}' has invalid URL: "
+                        f"'{val[:100]}'"
+                    ),
+                    current_value=val[:150],
+                    suggested_value="Use a valid https:// URL",
+                    raw_metadata={"schema_type": schema_type, "field": field},
+                ))
+
+        # ── Phone / email fields ────────────────────────────────────
+        phone_fields = ["telephone", "phone", "faxNumber"]
+        for field in phone_fields:
+            val = block.get(field)
+            if not val or not isinstance(val, str):
+                continue
+            # Must contain at least some digits
+            digits = re.sub(r"\D", "", val)
+            if len(digits) < 7:
+                findings.append(RawFinding(
+                    url=url, inspector="structured_data",
+                    category="schema_invalid_phone",
+                    description=(
+                        f"Schema '{schema_type}' field '{field}' value "
+                        f"'{val[:50]}' doesn't look like a valid phone number"
+                    ),
+                    current_value=val[:100],
+                    suggested_value="Use international format: +1-555-123-4567",
+                    raw_metadata={"schema_type": schema_type, "field": field},
+                ))
+
+        email_fields = ["email"]
+        for field in email_fields:
+            val = block.get(field)
+            if not val or not isinstance(val, str):
+                continue
+            if "@" not in val or "." not in val.split("@")[-1]:
+                findings.append(RawFinding(
+                    url=url, inspector="structured_data",
+                    category="schema_invalid_email",
+                    description=(
+                        f"Schema '{schema_type}' field '{field}' value "
+                        f"'{val[:50]}' doesn't look like a valid email"
+                    ),
+                    current_value=val[:100],
+                    suggested_value="Use a valid email address",
+                    raw_metadata={"schema_type": schema_type, "field": field},
+                ))
+
+        # ── Price fields ────────────────────────────────────────────
+        price_fields = ["price", "lowPrice", "highPrice", "minPrice", "maxPrice"]
+        for field in price_fields:
+            val = block.get(field)
+            if val is None:
+                continue
+            if isinstance(val, str):
+                # Should contain digits
+                if not re.search(r"\d", val):
+                    findings.append(RawFinding(
+                        url=url, inspector="structured_data",
+                        category="schema_invalid_price",
+                        description=(
+                            f"Schema '{schema_type}' field '{field}' value "
+                            f"'{val[:50]}' doesn't contain a numeric price"
+                        ),
+                        current_value=val[:100],
+                        suggested_value="Use a numeric price value",
+                        raw_metadata={"schema_type": schema_type, "field": field},
+                    ))
+
+        # ── Date fields ─────────────────────────────────────────────
+        date_fields = [
+            "datePublished", "dateModified", "startDate", "endDate",
+            "validFrom", "validThrough",
+        ]
+        for field in date_fields:
+            val = block.get(field)
+            if not val or not isinstance(val, str):
+                continue
+            # ISO 8601 check
+            iso_pattern = r"^\d{4}-\d{2}-\d{2}"
+            if not re.match(iso_pattern, val) and not re.match(
+                r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", val
+            ):
+                findings.append(RawFinding(
+                    url=url, inspector="structured_data",
+                    category="schema_invalid_date",
+                    description=(
+                        f"Schema '{schema_type}' field '{field}' value "
+                        f"'{val[:50]}' is not in ISO 8601 date format"
+                    ),
+                    current_value=val[:100],
+                    suggested_value="Use ISO 8601 format: 2024-01-15 or 2024-01-15T09:00:00",
+                    raw_metadata={"schema_type": schema_type, "field": field},
+                ))
+            else:
+                # Check if date is in the future for published/modified
+                from datetime import datetime
+                try:
+                    date_str = val[:10]
+                    dt = datetime.strptime(date_str, "%Y-%m-%d")
+                    now = datetime.utcnow()
+                    if field in ("datePublished", "dateModified") and dt > now:
+                        findings.append(RawFinding(
+                            url=url, inspector="structured_data",
+                            category="schema_future_date",
+                            description=(
+                                f"Schema '{schema_type}' field '{field}' is "
+                                f"set to {date_str}, which is in the future"
+                            ),
+                            current_value=val[:100],
+                            suggested_value="Use the actual publication date",
+                            raw_metadata={"schema_type": schema_type, "field": field},
+                        ))
+                except ValueError:
+                    pass
+
+        # ── Author fields ───────────────────────────────────────────
+        author_fields = ["author", "creator"]
+        for field in author_fields:
+            val = block.get(field)
+            if not val:
+                continue
+            name = val
+            if isinstance(val, dict):
+                name = val.get("name", "")
+            if not name or not isinstance(name, str):
+                continue
+            # Flag obviously non-name values
+            if len(name) < 2 or len(name) > 100:
+                findings.append(RawFinding(
+                    url=url, inspector="structured_data",
+                    category="schema_invalid_author",
+                    description=(
+                        f"Schema '{schema_type}' field '{field}' value "
+                        f"'{name[:80]}' doesn't look like a real name"
+                    ),
+                    current_value=str(name)[:100],
+                    suggested_value="Use the author's actual name",
+                    raw_metadata={"schema_type": schema_type, "field": field},
+                ))
+
+        return findings
 
     @staticmethod
     def _detect_content_schema(soup: BeautifulSoup, page_type: str) -> str:

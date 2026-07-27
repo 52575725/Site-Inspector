@@ -60,3 +60,40 @@ def test_search_has_no_random_placeholder_fallback(monkeypatch):
     monkeypatch.setattr(image_search, "_search_wikimedia", lambda *args: [])
 
     assert image_search.search_images("silver jewelry", count=3) == []
+
+
+def test_wikimedia_query_variants_broaden_long_editorial_title():
+    variants = image_search._wikimedia_query_variants(
+        "LBMA Good Delivery Standards: Complete Guide to Silver Bar Quality Specifications"
+    )
+
+    assert variants[0] == "silver bullion ingot"
+    assert "Silver Bar" in variants
+
+
+def test_visual_intent_rejects_silver_homonym_and_accepts_ingot():
+    assert not image_search._matches_visual_intent(
+        "silver bullion ingot",
+        "Bar of Silver",
+        "A fresh spring salmon returned to the river",
+        "Fish of Scotland",
+    )
+    assert image_search._matches_visual_intent(
+        "silver bullion ingot",
+        "Cast silver bar",
+        "A close-up of a silver bullion bar",
+        "Silver ingots",
+    )
+
+
+def test_visual_queries_vary_by_article_intent():
+    assert image_search._visual_query_for("Air freight security for silver") == (
+        "cargo aircraft freight"
+    )
+    assert image_search._visual_query_for("Silver price benchmark and futures") == (
+        "silver price chart"
+    )
+    assert image_search._visual_query_for("Industrial demand from solar panels silver") == (
+        "solar panels industry"
+    )
+    assert image_search._visual_query_for("LBMA silver bar purity") == "silver bullion ingot"
