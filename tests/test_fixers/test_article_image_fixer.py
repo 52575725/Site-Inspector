@@ -93,3 +93,78 @@ async def test_ai_fallback_is_disabled_without_explicit_opt_in(monkeypatch, tmp_
     assert not result.success
     assert fixer.image_generator is None
     assert "AI fallback is disabled" in result.error_message
+
+
+def test_images_are_placed_in_semantically_matching_sections():
+    html = """<html><head><title>Shipping Guide</title></head><body><article>
+    <h1>Silver Shipping</h1><p>Compare the available routes.</p>
+    <h2>Quick Comparison: Air Freight vs Sea Freight</h2>
+    <p>Compare aircraft speed with container ship capacity.</p>
+    <h2>Air Freight</h2><p>Aircraft provide fast airport-to-airport delivery.</p>
+    <h2>Sea Freight</h2><p>Container ships move large cargo through ports.</p>
+    <h2>Security Considerations</h2>
+    <p>Inspect cargo and customs risks before choosing a secure shipment.</p>
+    <h2>Customs Clearance</h2><p>Border inspection requires import documents.</p>
+    </article></body></html>"""
+    images = [
+        {
+            "local_path": "/images/ship.webp",
+            "query": "container ship port",
+            "alt_text": "Container vessel at sea",
+            "caption": "Container vessel",
+            "width": 1200,
+            "height": 800,
+        },
+        {
+            "local_path": "/images/plane.webp",
+            "query": "air cargo aircraft airport",
+            "alt_text": "Cargo airplane",
+            "caption": "Cargo airplane",
+            "width": 1200,
+            "height": 800,
+        },
+        {
+            "local_path": "/images/customs.webp",
+            "query": "customs cargo inspection",
+            "alt_text": "Customs inspection",
+            "caption": "Customs inspection",
+            "width": 1200,
+            "height": 800,
+        },
+    ]
+    soup = BeautifulSoup(html, "html.parser")
+
+    inserted = ArticleImageFixer()._insert_images(soup, images, include_hero=True)
+
+    assert inserted == 3
+    placements = {
+        image["local_path"]: image["placement_heading"] for image in images
+    }
+    assert placements == {
+        "/images/plane.webp": "Air Freight",
+        "/images/ship.webp": "Sea Freight",
+        "/images/customs.webp": "Customs Clearance",
+    }
+    assert images[1]["placement_heading"] == "Air Freight"
+    assert ArticleImageFixer._validate_document_integrity(html, soup, 3) is None
+
+
+def test_integrity_validation_rejects_article_text_changes():
+    html = """<html><body><article><h1>Guide</h1><p>Original text.</p>
+    <h2>Air Freight</h2><p>Aircraft delivery details.</p></article></body></html>"""
+    soup = BeautifulSoup(html, "html.parser")
+    soup.find("p").string = "Changed text."
+
+    error = ArticleImageFixer._validate_document_integrity(html, soup, 0)
+
+    assert error == "article text changed during image insertion"
+
+
+def test_semantic_terms_do_not_treat_airport_or_import_as_port():
+    airport_terms = ArticleImageFixer._semantic_terms("air cargo airport")
+    import_terms = ArticleImageFixer._semantic_terms("customs import documents")
+
+    assert "concept:air-freight" in airport_terms
+    assert "concept:sea-freight" not in airport_terms
+    assert "concept:customs" in import_terms
+    assert "concept:sea-freight" not in import_terms

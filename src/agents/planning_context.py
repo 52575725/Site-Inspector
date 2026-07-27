@@ -129,10 +129,12 @@ class PlanningContextCollector:
         settings: Settings,
         session: AsyncSession,
         *,
+        target_name: str | None = None,
         gsc: SearchConsoleReader | None = None,
         ga: AnalyticsReader | None = None,
     ):
         self.settings = settings
+        self.target_name = target_name or settings.target_name
         self.verify_repo = VerificationRepository(session)
         self.gsc = gsc or GoogleSearchConsole(
             credentials_path=settings.google_credentials_path,
@@ -217,7 +219,7 @@ class PlanningContextCollector:
 
     async def _load_feedback(self) -> dict[str, FeedbackSummary]:
         rows = await self.verify_repo.get_outcome_counts_by_category(
-            self.settings.target_name,
+            self.target_name,
         )
         grouped: dict[str, dict[str, int]] = defaultdict(dict)
         for category, status, count in rows:
@@ -228,7 +230,7 @@ class PlanningContextCollector:
         }
 
     def _load_objective(self) -> BusinessObjective:
-        target = self.settings.load_target(self.settings.target_name)
+        target = self.settings.load_target(self.target_name)
         raw = target.get("planning", {})
         if not isinstance(raw, dict):
             return BusinessObjective()

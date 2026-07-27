@@ -75,7 +75,7 @@ class GoogleSearchConsole:
                     "filters": [{
                         "dimension": "page",
                         "operator": "includingRegex",
-                        "expression": "|".join(urls),
+                        "expression": "|".join(re.escape(u) for u in urls),
                     }],
                 }]
 
@@ -114,7 +114,7 @@ class GoogleSearchConsole:
                     "filters": [{
                         "dimension": "page",
                         "operator": "includingRegex",
-                        "expression": "|".join(urls),
+                        "expression": "|".join(re.escape(u) for u in urls),
                     }],
                 }]
 
@@ -147,7 +147,7 @@ class GoogleSearchConsole:
                     "filters": [{
                         "dimension": "page",
                         "operator": "includingRegex",
-                        "expression": "|".join(urls),
+                        "expression": "|".join(re.escape(u) for u in urls),
                     }],
                 }],
                 "rowLimit": 500,

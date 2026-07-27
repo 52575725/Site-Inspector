@@ -19,6 +19,7 @@ from src.web.routes.issues import router as issues_router
 from src.web.routes.scans import router as scans_router
 from src.web.routes.settings_api import router as settings_api_router
 from src.web.routes.tools import router as tools_router
+from src.web.routes.trends import router as trends_router
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -55,6 +56,7 @@ def create_app() -> FastAPI:
     app.include_router(scans_router)
     app.include_router(settings_api_router)
     app.include_router(tools_router)
+    app.include_router(trends_router)
 
     @app.on_event("startup")
     async def startup():

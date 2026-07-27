@@ -22,6 +22,8 @@ class SitemapInspector(BaseInspector):
         self._base_url: str = ""
         self._already_checked: bool = False
         self._language_paths: dict[str, str] = {}
+        self._fetched_urls: set[str] = set()
+        self._fetch_depth: int = 0
 
     def set_language_paths(self, paths: dict[str, str]) -> None:
         self._language_paths = paths
@@ -139,8 +141,25 @@ class SitemapInspector(BaseInspector):
 
         return findings
 
+    async def setup(self) -> None:
+        self._fetched_urls.clear()
+        self._fetch_depth = 0
+        self._already_checked = False
+
     async def _fetch_sitemap(self, sitemap_url: str) -> dict[str, dict]:
         """Fetch and parse sitemap.xml. Returns {url: {lastmod, changefreq, hreflangs}}."""
+        # Guard against infinite recursion on circular sitemap indexes
+        MAX_DEPTH = 5
+        normalized = sitemap_url.rstrip("/")
+        if normalized in self._fetched_urls:
+            logger.warning(f"Skipping already-fetched sitemap: {sitemap_url}")
+            return {}
+        if self._fetch_depth >= MAX_DEPTH:
+            logger.warning(f"Sitemap index depth limit ({MAX_DEPTH}) reached at {sitemap_url}")
+            return {}
+        self._fetched_urls.add(normalized)
+        self._fetch_depth += 1
+
         try:
             async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
                 resp = await client.get(sitemap_url)
@@ -149,6 +168,8 @@ class SitemapInspector(BaseInspector):
         except Exception as e:
             logger.warning(f"Failed to fetch sitemap {sitemap_url}: {e}")
             raise
+        finally:
+            self._fetch_depth -= 1
 
         soup = BeautifulSoup(content, "xml")
 

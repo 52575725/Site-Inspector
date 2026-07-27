@@ -109,7 +109,7 @@ class Settings(BaseSettings):
     smtp_host: Optional[str] = None
     smtp_port: int = 587
     smtp_username: Optional[str] = None
-    smtp_password: Optional[str] = None
+    smtp_password: Optional[str] = Field(default=None, repr=False)
 
     # Scheduler
     daily_scan_time: str = "02:00"
@@ -166,13 +166,18 @@ class Settings(BaseSettings):
             ("web", "max_active_scans"): "web_max_active_scans",
         }
 
+        import logging
+        _cfg_logger = logging.getLogger(__name__)
         flat: dict = {}
         for section, values in yaml_values.items():
             if isinstance(values, dict):
                 for k, v in values.items():
                     key = field_map.get((section, k))
                     if key is None:
-                        raise ValueError(f"Unknown configuration option: {section}.{k}")
+                        _cfg_logger.warning(
+                            f"Ignoring unknown configuration option: {section}.{k}"
+                        )
+                        continue
                     flat[key] = v
             else:
                 flat[section] = values

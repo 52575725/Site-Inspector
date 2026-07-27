@@ -28,6 +28,7 @@ class ContentQualityInspector(BaseInspector):
         self.ollama = ollama
         self.prompts = prompt_manager or PromptManager()
         self._all_page_texts: list[str] = []
+        self._ollama_healthy: bool | None = None
 
     async def setup(self) -> None:
         pass
@@ -116,13 +117,13 @@ class ContentQualityInspector(BaseInspector):
         # Duplicate content detection — embedding-based if Ollama available
         if self._all_page_texts and len(self._all_page_texts) > 1:
             embed_fn = None
-            if self.ollama:
+            if self.ollama and self._ollama_healthy is None:
                 try:
-                    health = await self.ollama.health_check()
-                    if health:
-                        embed_fn = self.ollama.embed
+                    self._ollama_healthy = await self.ollama.health_check()
                 except Exception:
-                    pass
+                    self._ollama_healthy = False
+            if self.ollama and self._ollama_healthy:
+                embed_fn = self.ollama.embed
 
             dup_score = await detect_duplicate_risk(
                 text, self._all_page_texts, embed_fn=embed_fn,
@@ -142,31 +143,29 @@ class ContentQualityInspector(BaseInspector):
                     },
                 ))
 
-        # Ollama-based nuance analysis (optional)
-        if self.ollama and word_count >= 100:
+        # Ollama-based nuance analysis (optional, uses cached health check)
+        if self.ollama and word_count >= 100 and self._ollama_healthy:
             try:
-                health = await self.ollama.health_check()
-                if health:
-                    system, prompt = self.prompts.build_prompt(
-                        "content_quality",
-                        url=url,
-                        title=title,
-                        word_count=str(word_count),
-                        content_excerpt=text[:3000],
-                        language=language,
-                    )
-                    result = await self.ollama.generate_json(
-                        prompt=prompt, system=system, temperature=0.3, max_tokens=400,
-                    )
-                    ai_score = result.get("quality_score", 0)
-                    if ai_score < 5:
-                        findings.append(RawFinding(
-                            url=url, inspector=self.inspector_name,
-                            category="low_content_quality_ai",
-                            description=f"AI-assessed content quality score: {ai_score}/10. "
-                                        f"Issues: {', '.join(result.get('issues', []))}",
-                            raw_metadata=result,
-                        ))
+                system, prompt = self.prompts.build_prompt(
+                    "content_quality",
+                    url=url,
+                    title=title,
+                    word_count=str(word_count),
+                    content_excerpt=text[:3000],
+                    language=language,
+                )
+                result = await self.ollama.generate_json(
+                    prompt=prompt, system=system, temperature=0.3, max_tokens=400,
+                )
+                ai_score = result.get("quality_score", 0)
+                if ai_score < 5:
+                    findings.append(RawFinding(
+                        url=url, inspector=self.inspector_name,
+                        category="low_content_quality_ai",
+                        description=f"AI-assessed content quality score: {ai_score}/10. "
+                                    f"Issues: {', '.join(result.get('issues', []))}",
+                        raw_metadata=result,
+                    ))
             except Exception as e:
                 logger.debug(f"Ollama content analysis failed for {url}: {e}")
 

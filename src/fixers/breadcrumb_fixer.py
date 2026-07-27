@@ -34,6 +34,24 @@ class BreadcrumbFixer(BaseFixer):
         category = issue.get("category", "")
         suggested = issue.get("suggested_value", "")
 
+        # ── Idempotency: don't duplicate BreadcrumbList ──────────────
+        import json as _json
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = _json.loads(script.string or "{}")
+                blocks = data if isinstance(data, list) else [data]
+                for block in blocks:
+                    if isinstance(block, dict) and block.get("@type") == "BreadcrumbList":
+                        return FixResult(
+                            success=False, issue_id=issue.get("id", 0),
+                            fixer_name=self.fixer_name, fix_type=self.fix_type,
+                            file_path=issue.get("file_path", ""),
+                            before_content=page_content, after_content=page_content,
+                            error_message="BreadcrumbList already exists — idempotent skip",
+                        )
+            except (_json.JSONDecodeError, TypeError):
+                pass
+
         # Only act if the missing type is BreadcrumbList
         if category == "schema_missing_type" and "BreadcrumbList" not in suggested:
             return FixResult(

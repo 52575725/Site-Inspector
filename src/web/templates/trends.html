@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Trends — Site Inspector{% endblock %}
+{% block head %}
+<style>
+.trend-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 24px; padding: 24px; }
+.trend-card { background: var(--card-bg, #fff); border-radius: 12px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+.trend-card h3 { margin: 0 0 16px; font-size: 16px; color: var(--text-primary, #333); }
+.stat-row { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.stat-box { flex: 1; min-width: 120px; background: var(--bg-secondary, #f5f6fa); border-radius: 8px; padding: 16px; text-align: center; }
+.stat-box .value { font-size: 28px; font-weight: 700; color: var(--accent, #2d6ff7); }
+.stat-box .label { font-size: 12px; color: var(--text-secondary, #888); margin-top: 4px; }
+.chart-wrap { position: relative; height: 280px; }
+.summary-text { font-size: 14px; color: var(--text-secondary, #666); padding: 12px 24px; }
+</style>
+{% endblock %}
+{% block content %}
+<div class="summary-text" id="summary">{{ summary }}</div>
+<div class="stat-row" id="stats" style="padding:0 24px"></div>
+<div class="trend-grid">
+    <div class="trend-card"><h3>SEO Health Score Over Time</h3><div class="chart-wrap"><canvas id="healthChart"></canvas></div></div>
+    <div class="trend-card"><h3>Issues Discovered Per Scan</h3><div class="chart-wrap"><canvas id="issuesChart"></canvas></div></div>
+    <div class="trend-card"><h3>Top Issue Categories</h3><div class="chart-wrap"><canvas id="categoryChart"></canvas></div></div>
+    <div class="trend-card"><h3>Fix Status Distribution</h3><div class="chart-wrap"><canvas id="fixChart"></canvas></div></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function loadTrends() {
+    const r = await fetch('/api/trends/overview');
+    const data = await r.json();
+    document.getElementById('summary').textContent = data.trend_summary || '';
+
+    // Stats
+    const stats = document.getElementById('stats');
+    const latest = data.scans.length ? data.scans[data.scans.length - 1] : {};
+    stats.innerHTML = `
+        <div class="stat-box"><div class="value">${data.total_scans}</div><div class="label">Scans (30d)</div></div>
+        <div class="stat-box"><div class="value">${latest.pages_crawled || 0}</div><div class="label">Pages Crawled</div></div>
+        <div class="stat-box"><div class="value">${latest.new_issues || 0}</div><div class="label">Latest Issues</div></div>
+        <div class="stat-box"><div class="value">${data.fix_stats?.applied || 0}</div><div class="label">Fixes Applied</div></div>
+    `;
+
+    const dates = data.scans.map(s => (s.date || '').slice(0, 10));
+    const commonOpts = { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { x: { ticks: { maxTicksLimit: 10, font: { size: 11 } } }, y: { beginAtZero: true } } };
+
+    // Health score chart
+    new Chart(document.getElementById('healthChart'), { type: 'line', data: {
+        labels: dates, datasets: [{ data: data.scans.map(s => s.health_score),
+            borderColor: '#2d6ff7', backgroundColor: 'rgba(45,111,247,.1)', fill: true, tension: .3 }]
+    }, options: {...commonOpts, scales: {...commonOpts.scales, y: { min: 0, max: 100 }}} });
+
+    // Issues chart
+    new Chart(document.getElementById('issuesChart'), { type: 'bar', data: {
+        labels: dates, datasets: [{ data: data.scans.map(s => s.new_issues),
+            backgroundColor: '#ff6b6b' }]
+    }, options: commonOpts });
+
+    // Category chart
+    const cats = data.top_categories || [];
+    new Chart(document.getElementById('categoryChart'), { type: 'doughnut', data: {
+        labels: cats.map(c => c.category), datasets: [{ data: cats.map(c => c.count),
+            backgroundColor: ['#2d6ff7','#ff6b6b','#ffd93d','#6bcf7f','#9b59b6','#3498db','#e67e22','#1abc9c','#e74c3c','#95a5a6'] }]
+    }, options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: 'right', labels: { font: { size: 11 }, boxWidth: 12 }}} }});
+
+    // Fix distribution
+    const fStats = data.fix_stats || {};
+    new Chart(document.getElementById('fixChart'), { type: 'doughnut', data: {
+        labels: Object.keys(fStats), datasets: [{ data: Object.values(fStats),
+            backgroundColor: ['#6bcf7f','#ffd93d','#ff6b6b','#95a5a6'] }]
+    }, options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: 'right', labels: { font: { size: 11 }, boxWidth: 12 }}} }});
+}
+loadTrends();
+</script>
+{% endblock %}

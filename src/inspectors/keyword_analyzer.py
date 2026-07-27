@@ -125,8 +125,9 @@ class KeywordAnalyzer(BaseInspector):
                     url, soup, visible_text, words,
                 )
                 findings.extend(ai_findings)
-                if ai_findings:
-                    return findings  # AI did a full analysis, skip statistical
+                # Continue with statistical checks even if AI produced findings —
+                # AI catches semantic issues but may miss structural problems
+                # like keyword-not-in-URL or density issues.
 
         # ── Statistical fallback ───────────────────────────────────────
 

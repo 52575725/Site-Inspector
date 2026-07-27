@@ -221,7 +221,8 @@ class StructuredDataValidator(BaseInspector):
             if not isinstance(val, str) or not val:
                 continue
             parsed = urlparse(val)
-            if parsed.scheme not in ("http", "https"):
+            # Relative URLs are valid in JSON-LD context (schema.org allows them)
+            if parsed.scheme and parsed.scheme not in ("http", "https"):
                 findings.append(RawFinding(
                     url=url, inspector="structured_data",
                     category="schema_invalid_url",

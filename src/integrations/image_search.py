@@ -154,15 +154,114 @@ def download_image(url: str, dest_dir: str | Path, filename: str | None = None) 
         return None
 
 
+_LOCATION_NAMES = (
+    "Hong Kong", "Mainland China", "China", "Japan", "Tokyo", "Osaka",
+    "Singapore", "United States", "United Kingdom", "New York", "London",
+    "Europe", "European Union", "Asia", "Mexico", "Peru", "Chile",
+    "Australia", "Canada", "India", "Switzerland", "Shanghai", "Shenzhen",
+)
+
+_VISUAL_SCENES = (
+    (r"\b(?:air freight|air cargo|cargo aircraft|airport)\b", "air cargo airport"),
+    (r"\b(?:sea freight|ocean freight|container ships?|seaport)\b", "container ship port"),
+    (r"\b(?:customs clearance|customs inspection|border inspection)\b", "customs cargo inspection"),
+    (r"\b(?:shipping logistics|freight forwarding|supply chain)\b", "cargo logistics"),
+    (r"\b(?:warehouse|warehousing|secure storage|vault)\b", "warehouse storage"),
+    (r"\b(?:silver min(?:e|es|ing)|underground min(?:e|es|ing)|open-pit min(?:e|es|ing))\b", "silver mining"),
+    (r"\b(?:refinery|refining|smelter|smelting)\b", "silver refinery"),
+    (r"\b(?:assay|laboratory testing|quality inspection|quality control)\b", "silver assay laboratory"),
+    (r"\b(?:solar panels?|photovoltaic|solar farm)\b", "solar panels"),
+    (r"\b(?:jewelry|jewellery|silver rings?|silver necklaces?)\b", "silver jewelry"),
+    (r"\b(?:price chart|price history|market chart|trading chart)\b", "silver price chart"),
+    (r"\b(?:futures exchange|commodity exchange|trading floor)\b", "commodities exchange trading"),
+    (r"\b(?:factory|manufacturing plant|production line)\b", "industrial factory"),
+    (r"\b(?:rail freight|freight train)\b", "freight train"),
+    (r"\b(?:road freight|cargo truck|trucking)\b", "cargo truck"),
+)
+
+
+def _extract_visual_facets(text: str) -> list[str]:
+    """Extract concrete, photographable places and scenes in source order."""
+    locations = []
+    for name in _LOCATION_NAMES:
+        match = re.search(rf"\b{re.escape(name)}\b", text, flags=re.IGNORECASE)
+        if match:
+            locations.append((match.start(), name))
+
+    # Also recognize proper place names attached to explicit geographic nouns.
+    place_pattern = re.compile(
+        r"\b([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2}\s+"
+        r"(?:Airport|Harbou?r|Port|Terminal|Exchange|Mine|Refinery))\b"
+    )
+    locations.extend((match.start(), match.group(1)) for match in place_pattern.finditer(text))
+
+    # Capture unlisted geographic names from natural route/location phrases.
+    location_cue_pattern = re.compile(
+        r"\b(?:in|from|to|via|through|across|near|at)\s+"
+        r"((?:the\s+)?[A-Z][A-Za-z.'-]*(?:\s+(?:and|of|the|[A-Z][A-Za-z.'-]*)){0,2})"
+    )
+    ignored_locations = {
+        "Conclusion", "Introduction", "Summary", "This", "That", "What", "Why",
+    }
+    for match in location_cue_pattern.finditer(text):
+        location = match.group(1).strip()
+        if location not in ignored_locations:
+            locations.append((match.start(1), location))
+
+    deduplicated_locations = []
+    seen_locations = set()
+    for position, location in sorted(locations, key=lambda item: item[0]):
+        key = location.lower()
+        if key not in seen_locations:
+            seen_locations.add(key)
+            deduplicated_locations.append((position, location))
+    locations = deduplicated_locations
+    locations.sort(key=lambda item: item[0])
+
+    scenes = []
+    for pattern, search_phrase in _VISUAL_SCENES:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            scenes.append((match.start(), search_phrase))
+    scenes.sort(key=lambda item: item[0])
+
+    facets: list[str] = []
+    used_locations = set()
+    for position, scene in scenes:
+        nearby = [item for item in locations if abs(item[0] - position) <= 500]
+        if nearby:
+            _, location = min(nearby, key=lambda item: abs(item[0] - position))
+            facet = f"{location} {scene}"
+            used_locations.add(location.lower())
+        else:
+            facet = scene
+        if facet.lower() not in {value.lower() for value in facets}:
+            facets.append(facet)
+
+    for _, location in locations:
+        if location.lower() not in used_locations:
+            facets.append(location)
+    return facets
+
+
 def extract_keywords_from_html(html_content: str, max_queries: int = 3) -> list[str]:
     """Extract search queries from article HTML content.
 
-    Uses title + headings. Returns a list of keyword phrases for image search.
+    Prioritizes concrete places, transport modes, and photographable scenes,
+    then falls back to title and headings.
     """
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html_content, "html.parser")
     queries: list[str] = []
+
+    article = soup.find("article") or soup.find("main") or soup.body or soup
+    for tag in article.find_all(["script", "style", "nav", "footer", "header"]):
+        tag.decompose()
+    article_text = article.get_text(separator=" ", strip=True)
+
+    # Concrete article details produce more varied images than editorial titles.
+    queries.extend(_extract_visual_facets(article_text))
 
     # 1. Title as primary query
     title_tag = soup.find("title")
@@ -174,13 +273,18 @@ def extract_keywords_from_html(html_content: str, max_queries: int = 3) -> list[
                 title = title.split(sep)[0].strip()
                 break
         if len(title) > 5:
-            queries.append(title)
+            if title.lower() not in {query.lower() for query in queries}:
+                queries.append(title)
 
     # 2. H1
     h1 = soup.find("h1")
     if h1:
         h1_text = h1.get_text(strip=True)
-        if h1_text and len(h1_text) > 10 and h1_text not in queries:
+        if (
+            h1_text
+            and len(h1_text) > 10
+            and h1_text.lower() not in {query.lower() for query in queries}
+        ):
             queries.append(h1_text)
 
     # 3. Use section headings so each image can match a different part of the article.
@@ -189,7 +293,7 @@ def extract_keywords_from_html(html_content: str, max_queries: int = 3) -> list[
         h2_text = h2.get_text(strip=True)
         if h2_text and len(h2_text) > 5:
             # Use H2 as a standalone query if distinct enough
-            if h2_text not in " ".join(queries):
+            if h2_text.lower() not in " ".join(queries).lower():
                 queries.append(h2_text)
             if len(queries) >= max_queries:
                 break
@@ -199,13 +303,9 @@ def extract_keywords_from_html(html_content: str, max_queries: int = 3) -> list[
 
     # If nothing found, try to extract from body text
     if not result:
-        body = soup.find("body")
-        if body:
-            for tag in body.find_all(["script", "style", "nav", "footer", "header"]):
-                tag.decompose()
-            text = body.get_text(separator=" ", strip=True)
+        if article_text:
             # Take first meaningful sentence as query
-            words = text.split()[:15]
+            words = article_text.split()[:15]
             if words:
                 result.append(" ".join(words))
 
@@ -386,31 +486,50 @@ def _wikimedia_query_variants(query: str) -> list[str]:
 def _visual_query_for(query: str) -> str:
     """Map editorial language to a concrete subject that can be photographed."""
     lowered = query.lower()
+    location = next(
+        (name for name in _LOCATION_NAMES if re.search(
+            rf"\b{re.escape(name)}\b", query, flags=re.IGNORECASE
+        )),
+        "",
+    )
+    explicit_place = re.search(
+        r"\b([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2}\s+"
+        r"(?:Airport|Harbou?r|Port|Terminal|Exchange|Mine|Refinery))\b",
+        query,
+    )
+    location = location or (explicit_place.group(1) if explicit_place else "")
+
+    visual_subject = ""
     if any(term in lowered for term in ("solar", "photovoltaic")):
-        return "solar panels industry"
-    if any(term in lowered for term in ("air freight", "air cargo", "airport")):
-        return "cargo aircraft freight"
-    if any(term in lowered for term in ("sea freight", "ocean freight", "container ship")):
-        return "container ship cargo"
-    if any(term in lowered for term in ("customs", "import", "export", "tariff")):
-        return "customs cargo inspection"
-    if any(term in lowered for term in ("shipping", "logistics", "freight")):
-        return "international cargo freight"
-    if any(term in lowered for term in ("mine", "mining", "geological", "origin")):
-        return "silver mining"
-    if any(term in lowered for term in ("jewelry", "jewellery", "ring", "necklace")):
-        return "silver jewelry"
-    if any(term in lowered for term in (
+        visual_subject = "solar panels industry"
+    elif any(term in lowered for term in ("air freight", "air cargo", "airport")):
+        visual_subject = "cargo aircraft freight"
+    elif any(term in lowered for term in ("sea freight", "ocean freight", "container ship")):
+        visual_subject = "container ship cargo"
+    elif any(term in lowered for term in ("customs", "import", "export", "tariff")):
+        visual_subject = "customs cargo inspection"
+    elif any(term in lowered for term in ("shipping", "logistics", "freight")):
+        visual_subject = "international cargo freight"
+    elif any(term in lowered for term in ("mine", "mining", "geological", "origin")):
+        visual_subject = "silver mining"
+    elif any(term in lowered for term in ("jewelry", "jewellery", "ring", "necklace")):
+        visual_subject = "silver jewelry"
+    elif any(term in lowered for term in (
         "price", "pricing", "market", "benchmark", "futures", "inventory", "etf",
     )):
-        return "silver price chart"
-    if any(term in lowered for term in (
+        visual_subject = "silver price chart"
+    elif any(term in lowered for term in (
         "lbma", "bullion", "ingot", "silver bar", "assay", "refinery", "purity",
     )):
-        return "silver bullion ingot"
-    if "silver" in lowered:
-        return "silver bullion ingot"
-    return ""
+        visual_subject = "silver bullion ingot"
+    elif location:
+        return location
+    elif "silver" in lowered:
+        visual_subject = "silver bullion ingot"
+
+    if location and visual_subject and location.lower() not in visual_subject.lower():
+        return f"{location} {visual_subject}"
+    return visual_subject
 
 
 def _matches_visual_intent(

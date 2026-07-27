@@ -315,10 +315,23 @@ class CompetitorGapInspector(BaseInspector):
             timeout=self.timeout, follow_redirects=True,
             headers={"User-Agent": "SiteInspector/1.0"},
         ) as client:
-            for url in self.competitor_urls:
+            # Fetch all competitors concurrently instead of sequentially
+            async def _fetch_one(url: str):
                 try:
                     resp = await client.get(url)
                     resp.raise_for_status()
+                    return url, resp
+                except Exception as e:
+                    logger.warning(f"Competitor fetch failed {url}: {e}")
+                    return url, None
+
+            results = await asyncio.gather(
+                *[_fetch_one(u) for u in self.competitor_urls],
+            )
+            for url, resp in results:
+                if resp is None:
+                    continue
+                try:
                     self._competitor_html[url] = resp.text
                     soup = BeautifulSoup(resp.text, "html.parser")
                     profile = self._extract_profile(url, soup)

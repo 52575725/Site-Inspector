@@ -463,8 +463,18 @@ class ContentFreshnessInspector(BaseInspector):
     # ── Utility ─────────────────────────────────────────────────────
 
     def _months_since(self, dt: datetime) -> int:
-        """Calculate whole months between a date and today."""
+        """Calculate approximate calendar months between a date and today.
+
+        Uses year+month arithmetic for accuracy instead of days//30.
+        """
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        delta = self._today - dt
-        return delta.days // 30
+        today = self._today
+        if today.tzinfo is None:
+            today = today.replace(tzinfo=timezone.utc)
+        months = (today.year - dt.year) * 12 + (today.month - dt.month)
+        # Adjust for day-of-month: if today's day is earlier in the month
+        # than the original date, we haven't quite reached the full month.
+        if today.day < dt.day:
+            months -= 1
+        return max(0, months)

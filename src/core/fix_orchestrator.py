@@ -23,6 +23,7 @@ from src.fixers.keywords_fixer import KeywordsFixer
 from src.fixers.hreflang_fixer import HreflangFixer
 from src.fixers.htag_restructurer import HTagRestructurer
 from src.fixers.image_optimizer import ImageOptimizer
+from src.fixers.internal_link_fixer import InternalLinkFixer
 from src.fixers.jsonld_generator import JsonLdGenerator
 from src.fixers.link_fixer import LinkFixer
 from src.fixers.meta_fixer import MetaFixer
@@ -125,6 +126,7 @@ class FixOrchestrator:
             EEATFixer(),
             FreshnessFixer(),
             KeywordsFixer(),
+            InternalLinkFixer(),
         ]
 
     async def run_fixes(self, issues: Sequence[Issue],
@@ -313,6 +315,22 @@ class FixOrchestrator:
 
                 # Chain: next fixer sees this fixer's output
                 page_content = result.after_content
+
+                # ── Inter-fixer sanitization: detect corruption before next fixer ──
+                if page_content != result.before_content:
+                    inter_check = sanitize_html(file_path, page_content)
+                    if inter_check.was_malformed:
+                        logger.error(
+                            f"Fixer '{fixer.fixer_name}' introduced corruption on "
+                            f"{file_path}: {'; '.join(inter_check.issues_found)}. "
+                            f"Rolling back and aborting fixer chain for this page."
+                        )
+                        # Restore pre-fixer content and stop processing this page
+                        page_content = result.before_content
+                        fix.status = "validation_failed"
+                        fix.applied_at = None
+                        await self.issue_repo.update_status(issue.id, "open")
+                        break
 
                 # Record fix
                 explanation = describe_issue(issue.category, issue.description or "")

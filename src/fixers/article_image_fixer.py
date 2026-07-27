@@ -202,6 +202,7 @@ class ArticleImageFixer(BaseFixer):
                     original_path.unlink(missing_ok=True)
                 result_dict = {
                     "local_path": f"/images/{asset_path.name}",
+                    "query": query,
                     "alt_text": result.alt_text or query,
                     "caption": result.alt_text or query,
                     "width": result.width or 800,
@@ -224,6 +225,7 @@ class ArticleImageFixer(BaseFixer):
                 if generated_path:
                     downloaded.append({
                         "local_path": f"/images/{generated_path.name}",
+                        "query": query,
                         "alt_text": query,
                         "caption": query,
                         "width": 1536,
@@ -263,6 +265,23 @@ class ArticleImageFixer(BaseFixer):
                 error_message="Could not find suitable insertion points in article",
             )
 
+        integrity_error = self._validate_document_integrity(
+            page_content,
+            soup,
+            modified_count,
+        )
+        if integrity_error:
+            return FixResult(
+                success=False,
+                issue_id=issue_id,
+                fixer_name=self.fixer_name,
+                fix_type=self.fix_type,
+                file_path=file_path,
+                before_content=page_content,
+                after_content=page_content,
+                error_message=f"Image insertion failed integrity validation: {integrity_error}",
+            )
+
         new_content = str(soup)
         diff = "\n".join(difflib.unified_diff(
             page_content.splitlines(keepends=True),
@@ -296,9 +315,8 @@ class ArticleImageFixer(BaseFixer):
     ) -> int:
         """Insert images at natural positions in the article body.
 
-        Strategy:
-        - First image: after H1 (hero/featured image)
-        - Remaining images: after H2 sections (illustrate each section)
+        Match each image's query and description to the most relevant H2.
+        Unmatched images use the introduction and distributed sections.
         """
         inserted = 0
 
@@ -308,34 +326,235 @@ class ArticleImageFixer(BaseFixer):
 
         self._ensure_image_styles(soup)
 
-        # Image 1: after the introduction, not between the H1 and its lead text.
-        if images and include_hero:
+        sections = [
+            {
+                "heading": heading,
+                "anchor": self._section_anchor(heading),
+                "text": self._section_text(heading),
+            }
+            for heading in main.find_all("h2")
+        ]
+        assignments = self._match_images_to_sections(images, sections)
+        placed_images = set()
+        used_anchors = set()
+
+        for image_index, section_index in assignments.items():
+            image = images[image_index]
+            section = sections[section_index]
+            anchor = section["anchor"]
+            figure = BeautifulSoup(
+                self._build_figure_tag(image, is_hero=False), "html.parser",
+            )
+            anchor.insert_after(figure)
+            image["placement_heading"] = section["heading"].get_text(" ", strip=True)
+            placed_images.add(image_index)
+            used_anchors.add(id(anchor))
+            inserted += 1
+
+        remaining = [
+            (index, image) for index, image in enumerate(images)
+            if index not in placed_images
+        ]
+        if remaining and include_hero:
+            index, image = remaining.pop(0)
             h1 = main.find("h1")
             intro = h1.find_next("p") if h1 else main.find("p")
             anchor = intro or h1
             figure = BeautifulSoup(
-                self._build_figure_tag(images[0], is_hero=True), "html.parser",
+                self._build_figure_tag(image, is_hero=True), "html.parser",
             )
             if anchor:
                 anchor.insert_after(figure)
+                used_anchors.add(id(anchor))
             else:
                 main.insert(0, figure)
+            image["placement_heading"] = h1.get_text(" ", strip=True) if h1 else "Introduction"
+            placed_images.add(index)
             inserted += 1
 
-        # Remaining images: spread across the article's H2 sections.
-        remaining_images = images[1:] if include_hero else images
-        if remaining_images:
-            h2_tags = main.find_all("h2")
-            remaining = len(remaining_images)
-            anchors = self._distributed_anchors(main, h2_tags, remaining)
-            for image, anchor in zip(remaining_images, anchors):
+        if remaining:
+            available_h2 = [
+                section["heading"] for section in sections
+                if id(section["anchor"]) not in used_anchors
+            ]
+            anchors = self._distributed_anchors(main, available_h2, len(remaining))
+            for (_, image), anchor in zip(remaining, anchors):
                 figure = BeautifulSoup(
                     self._build_figure_tag(image, is_hero=False), "html.parser",
                 )
                 anchor.insert_after(figure)
+                heading = (
+                    anchor if getattr(anchor, "name", None) == "h2"
+                    else anchor.find_previous("h2")
+                )
+                image["placement_heading"] = (
+                    heading.get_text(" ", strip=True) if heading else "Article body"
+                )
                 inserted += 1
 
         return inserted
+
+    _SEMANTIC_STOPWORDS = {
+        "article", "complete", "content", "guide", "image", "industry",
+        "international", "photo", "silver", "the", "this", "with",
+    }
+    _SEMANTIC_CONCEPTS = {
+        "air-freight": {
+            "air cargo", "air freight", "aircraft", "airplane", "airport",
+            "aviation", "flight",
+        },
+        "sea-freight": {
+            "cargo ship", "container", "ocean freight", "port", "sea freight",
+            "ship", "vessel",
+        },
+        "customs": {"border", "clearance", "customs", "inspection", "tariff"},
+        "logistics": {
+            "cargo", "freight", "logistics", "shipping", "supply chain", "transport",
+        },
+        "storage": {"storage", "vault", "warehouse", "warehousing"},
+        "mining": {"geology", "mine", "mining", "ore"},
+        "refining": {"assay", "laboratory", "refinery", "refining", "smelter"},
+        "solar": {"photovoltaic", "solar panel", "solar panels"},
+        "jewelry": {"jewellery", "jewelry", "necklace", "ring"},
+        "market": {
+            "benchmark", "chart", "exchange", "futures", "inventory", "price", "trading",
+        },
+    }
+
+    @classmethod
+    def _semantic_terms(cls, value: str) -> set[str]:
+        lowered = value.lower()
+        terms = {
+            token for token in re.findall(r"[a-z0-9]+", lowered)
+            if len(token) >= 3
+            and token not in cls._SEMANTIC_STOPWORDS
+            and not token.isdigit()
+        }
+        for concept, phrases in cls._SEMANTIC_CONCEPTS.items():
+            if any(
+                re.search(rf"\b{re.escape(phrase)}\b", lowered)
+                for phrase in phrases
+            ):
+                terms.add(f"concept:{concept}")
+        return terms
+
+    @staticmethod
+    def _section_text(heading) -> str:
+        parts = [heading.get_text(" ", strip=True)]
+        current = heading.find_next_sibling()
+        while current is not None and getattr(current, "name", None) != "h2":
+            if getattr(current, "get_text", None):
+                parts.append(current.get_text(" ", strip=True))
+            current = current.find_next_sibling()
+        return " ".join(parts)
+
+    @classmethod
+    def _match_images_to_sections(
+        cls,
+        images: list[dict],
+        sections: list[dict],
+    ) -> dict[int, int]:
+        scored_pairs = []
+        for image_index, image in enumerate(images):
+            query_terms = cls._semantic_terms(str(image.get("query", "")))
+            description_text = " ".join(
+                str(image.get(key, "")) for key in ("alt_text", "caption")
+            )
+            description_terms = cls._semantic_terms(description_text)
+            image_terms = query_terms | description_terms
+            for section_index, section in enumerate(sections):
+                heading_text = section["heading"].get_text(" ", strip=True)
+                heading_terms = cls._semantic_terms(heading_text)
+                section_terms = cls._semantic_terms(section["text"])
+                query_heading_overlap = query_terms & heading_terms
+                description_heading_overlap = description_terms & heading_terms
+                body_overlap = image_terms & section_terms
+                query_concepts = {
+                    term for term in query_terms if term.startswith("concept:")
+                }
+                heading_concepts = {
+                    term for term in heading_terms if term.startswith("concept:")
+                }
+                query_heading_concepts = query_concepts & heading_concepts
+                broad_concepts = {"concept:logistics"}
+                specific_query_concepts = query_concepts - broad_concepts
+                specific_heading_concepts = heading_concepts - broad_concepts
+                conflicting_heading_concepts = set()
+                if specific_query_concepts:
+                    conflicting_heading_concepts = (
+                        specific_heading_concepts - specific_query_concepts
+                    )
+                score = (
+                    len(query_heading_overlap) * 12
+                    + len(query_heading_concepts) * 12
+                    + len(description_heading_overlap) * 3
+                    + min(len(body_overlap), 5)
+                    - len(conflicting_heading_concepts) * 30
+                )
+                if score >= 4:
+                    scored_pairs.append((score, image_index, section_index))
+
+        assignments = {}
+        used_sections = set()
+        for _, image_index, section_index in sorted(scored_pairs, reverse=True):
+            if image_index in assignments or section_index in used_sections:
+                continue
+            assignments[image_index] = section_index
+            used_sections.add(section_index)
+        return assignments
+
+    @classmethod
+    def _validate_document_integrity(
+        cls,
+        original_html: str,
+        modified_soup: BeautifulSoup,
+        expected_inserted: int,
+    ) -> str | None:
+        """Return an error when insertion changed article content or core structure."""
+        original = BeautifulSoup(original_html, "html.parser")
+        reparsed = BeautifulSoup(str(modified_soup), "html.parser")
+        figures = reparsed.select("figure.article-media")
+        if len(figures) != expected_inserted:
+            return "inserted figure count changed after HTML parsing"
+        for figure in figures:
+            image = figure.find("img", recursive=False)
+            caption = figure.find("figcaption", recursive=False)
+            if not image or not image.get("src") or image.get("alt") is None or not caption:
+                return "an inserted figure is missing its image, alt text, or caption"
+            if not str(image.get("width", "")).isdigit() or not str(
+                image.get("height", ""),
+            ).isdigit():
+                return "an inserted image has invalid dimensions"
+
+        original_main = cls._find_main(original)
+        modified_main = cls._find_main(reparsed)
+        if original_main is None or modified_main is None:
+            return "article content container is missing"
+        for figure in modified_main.select("figure.article-media"):
+            figure.decompose()
+        style = reparsed.find("style", id="site-inspector-article-images")
+        if style:
+            style.decompose()
+
+        def normalize(value: str) -> str:
+            return " ".join(value.split())
+
+        if normalize(original_main.get_text(" ", strip=True)) != normalize(
+            modified_main.get_text(" ", strip=True),
+        ):
+            return "article text changed during image insertion"
+
+        protected_tags = (
+            "h1", "h2", "h3", "p", "ul", "ol", "li", "table", "form", "script", "iframe",
+        )
+        for tag_name in protected_tags:
+            if len(original.find_all(tag_name)) != len(reparsed.find_all(tag_name)):
+                return f"{tag_name} structure changed during image insertion"
+        baseline_markup = str(BeautifulSoup(str(original), "html.parser"))
+        preserved_markup = str(BeautifulSoup(str(reparsed), "html.parser"))
+        if baseline_markup != preserved_markup:
+            return "existing HTML elements or attributes changed during image insertion"
+        return None
 
     @staticmethod
     def _build_figure_tag(image: dict, is_hero: bool = False) -> str:

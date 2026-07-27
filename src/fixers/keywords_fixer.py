@@ -123,8 +123,12 @@ class KeywordsFixer(BaseFixer):
         if keyword.lower() in current.lower():
             return page_content
 
-        # Prepend keyword to existing H1 only
-        h1.string = f"{keyword}: {current}"
+        # Prepend keyword to existing H1 — use insert(0, ...) to preserve
+        # child elements (links, spans, etc.) instead of .string which
+        # destroys all nested tags.
+        keyword_span = soup.new_tag("span")
+        keyword_span.string = f"{keyword}: "
+        h1.insert(0, keyword_span)
         return str(soup)
 
     # ── First Paragraph Fix ─────────────────────────────────────────
@@ -170,7 +174,17 @@ class KeywordsFixer(BaseFixer):
                 sentences[0] = first_sentence
             else:
                 sentences.insert(0, f"When it comes to {keyword}, {sentences[0][0].lower() + sentences[0][1:]}")
-            first_p.string = " ".join(sentences)
+            new_text = " ".join(sentences)
+            # Replace text content safely: insert text node before children,
+            # then clear children, then set the text node's content
+            if len(list(first_p.children)) == 1 and first_p.string is not None:
+                # Simple text node — safe to use .string
+                first_p.string = new_text
+            else:
+                # Has child elements — prepend keyword span instead
+                keyword_span = soup.new_tag("span")
+                keyword_span.string = f"{keyword} — "
+                first_p.insert(0, keyword_span)
 
         return str(soup)
 
@@ -235,7 +249,7 @@ class KeywordsFixer(BaseFixer):
         from urllib.parse import urlparse
         path = urlparse(url).path.strip("/")
         if not path or path.endswith("/"):
-            return (path or "index") + "index.html"
+            return (path or "") + "index.html"
         if "." not in path.split("/")[-1]:
             return path + "/index.html"
         return path

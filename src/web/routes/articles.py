@@ -116,9 +116,14 @@ async def translate_article(request: Request, body: TranslateRequest):
     if not api_key:
         raise HTTPException(status_code=400, detail="DeepSeek API key not configured")
 
-    # Read source file from repo
+    # Read source file from repo — prevent path traversal
     from pathlib import Path
-    source_file = Path("data/site_sources") / settings.target_name / body.source_path
+    from src.sources.base import resolve_within
+    base_dir = Path("data/site_sources") / settings.target_name
+    try:
+        source_file = resolve_within(base_dir, body.source_path)
+    except ValueError:
+        raise HTTPException(status_code=403, detail=f"Invalid source path: {body.source_path}")
     if not source_file.exists():
         raise HTTPException(status_code=404, detail=f"源文件不存在: {body.source_path}")
 

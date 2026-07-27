@@ -44,35 +44,35 @@ class MobileInspector(BaseInspector):
             return findings
 
         page = await self._browser.new_page()
-
         try:
-            await page.goto(url, wait_until="networkidle", timeout=30000)
-        except Exception as e:
-            logger.warning(f"Failed to load {url} for mobile check: {e}")
+            try:
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+            except Exception as e:
+                logger.warning(f"Failed to load {url} for mobile check: {e}")
+                return findings
+
+            # Check viewport meta tag
+            viewport_meta = await page.evaluate("""() => {
+                const meta = document.querySelector('meta[name="viewport"]');
+                return meta ? meta.content : null;
+            }""")
+            if not viewport_meta:
+                findings.append(RawFinding(
+                    url=url, inspector=self.inspector_name,
+                    category="missing_viewport_meta",
+                    description="Page has no viewport meta tag (required for mobile)",
+                ))
+
+            # Check at each viewport
+            for vp_name, vp_size in MOBILE_VIEWPORTS.items():
+                await page.set_viewport_size(vp_size)
+                await page.wait_for_timeout(500)
+
+                vp_findings = await self._check_viewport(page, url, vp_name, vp_size)
+                findings.extend(vp_findings)
+        finally:
             await page.close()
-            return findings
 
-        # Check viewport meta tag
-        viewport_meta = await page.evaluate("""() => {
-            const meta = document.querySelector('meta[name="viewport"]');
-            return meta ? meta.content : null;
-        }""")
-        if not viewport_meta:
-            findings.append(RawFinding(
-                url=url, inspector=self.inspector_name,
-                category="missing_viewport_meta",
-                description="Page has no viewport meta tag (required for mobile)",
-            ))
-
-        # Check at each viewport
-        for vp_name, vp_size in MOBILE_VIEWPORTS.items():
-            await page.set_viewport_size(vp_size)
-            await page.wait_for_timeout(500)
-
-            vp_findings = await self._check_viewport(page, url, vp_name, vp_size)
-            findings.extend(vp_findings)
-
-        await page.close()
         return findings
 
     async def _check_viewport(self, page, url: str, vp_name: str,

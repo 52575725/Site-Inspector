@@ -181,19 +181,21 @@ class EEATFixer(BaseFixer):
     def _add_visible_date(self, soup: BeautifulSoup, page_content: str) -> str:
         """Add a visible 'Published on' line near the article header."""
         today = datetime.utcnow().strftime("%B %d, %Y")
-        date_html = f'<p class="article-date">Published: {today}</p>'
+
+        # Create a proper <p> tag (not a full document) to avoid nesting
+        # <html><head><body> inside the page when BeautifulSoup wraps the fragment.
+        date_tag = soup.new_tag("p", **{"class": "article-date"})
+        date_tag.string = f"Published: {today}"
 
         # Insert after H1 or at the top of the article body
         h1 = soup.find("h1")
         if h1:
-            date_tag = BeautifulSoup(date_html, "html.parser")
             h1.insert_after(date_tag)
             return str(soup)
 
         # Fallback: insert at top of body
         body = soup.find("body")
         if body:
-            date_tag = BeautifulSoup(date_html, "html.parser")
             body.insert(0, date_tag)
 
         return str(soup)
@@ -274,7 +276,7 @@ class EEATFixer(BaseFixer):
         from urllib.parse import urlparse
         path = urlparse(url).path.strip("/")
         if not path or path.endswith("/"):
-            return (path or "index") + "index.html"
+            return (path or "") + "index.html"
         if "." not in path.split("/")[-1]:
             return path + "/index.html"
         return path

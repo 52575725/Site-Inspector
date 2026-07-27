@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 from pathlib import Path
 
 from src.sources.base import BaseSource, resolve_within
+
+# Safe patterns for git branch names and URLs
+_BRANCH_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,200}$")
+_URL_RE = re.compile(r"^https?://[^\s]+$")
 
 
 class GitSource(BaseSource):
@@ -14,6 +19,17 @@ class GitSource(BaseSource):
 
     def __init__(self, repo_url: str, branch: str = "main",
                  work_dir: Path | None = None):
+        # Validate inputs to prevent git option injection
+        if not _BRANCH_RE.match(branch):
+            raise ValueError(
+                f"Invalid branch name: {branch!r}. "
+                f"Must match pattern: {_BRANCH_RE.pattern}"
+            )
+        if repo_url.startswith("-") or not _URL_RE.match(repo_url):
+            raise ValueError(
+                f"Invalid repo URL: {repo_url!r}. "
+                f"Must be a valid http/https URL."
+            )
         self.repo_url = repo_url
         self.branch = branch
         self._work_dir = work_dir

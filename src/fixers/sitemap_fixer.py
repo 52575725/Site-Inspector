@@ -138,13 +138,16 @@ class SitemapFixer(BaseFixer):
 
             lang = self._lang_code_for_url(url)
             counterpart = self._get_counterpart_url(url)
-            alt_lang = self._lang_code_for_url(counterpart) if counterpart else list(self._lang_paths.keys())[0]
 
             link1 = soup.new_tag("xhtml:link", rel="alternate",
                                  hreflang=lang, href=url)
-            link2 = soup.new_tag("xhtml:link", rel="alternate",
-                                 hreflang=alt_lang, href=counterpart)
             url_elem.append(link1)
+
+            if counterpart:
+                alt_lang = self._lang_code_for_url(counterpart)
+                link2 = soup.new_tag("xhtml:link", rel="alternate",
+                                     hreflang=alt_lang, href=counterpart)
+                url_elem.append(link2)
             url_elem.append(link2)
             break
 

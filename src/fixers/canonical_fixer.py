@@ -63,7 +63,7 @@ class CanonicalFixer(BaseFixer):
         from urllib.parse import urlparse
         path = urlparse(url).path.strip("/")
         if not path or path.endswith("/"):
-            return (path or "index") + "index.html"
+            return (path or "") + "index.html"
         if "." not in path.split("/")[-1]:
             return path + "/index.html"
         return path

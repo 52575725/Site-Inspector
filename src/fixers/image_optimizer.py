@@ -264,9 +264,14 @@ class ImageOptimizer(BaseFixer):
         from pathlib import Path
         from src.integrations.image_webp import convert_to_webp
 
-        # Resolve image path relative to source root
+        # Resolve image path relative to source root — prevent path traversal
+        from src.sources.base import resolve_within
         clean_src = src.lstrip("/")
-        image_path = Path(work_dir) / clean_src
+        try:
+            image_path = resolve_within(Path(work_dir), clean_src)
+        except ValueError:
+            logger.warning(f"Path traversal blocked for image src: {src}")
+            return False
         if not image_path.exists():
             # Try without leading path segments
             image_path = Path(work_dir) / image_path.name
