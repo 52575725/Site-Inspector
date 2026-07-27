@@ -24,6 +24,10 @@ def get_engine(settings: Settings | None = None):
         _engine = create_async_engine(
             f"sqlite+aiosqlite:///{db_path}",
             echo=False,
+            pool_size=5,
+            max_overflow=10,
+            pool_recycle=3600,
+            connect_args={"timeout": 30},
         )
     return _engine
 

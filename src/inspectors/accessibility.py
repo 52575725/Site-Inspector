@@ -109,11 +109,16 @@ class AccessibilityInspector(BaseInspector):
             has_aria_label = inp.get("aria-label") or inp.get("aria-labelledby")
             has_placeholder = inp.get("placeholder")
 
-            # Check for associated label
+            # Check for associated label (explicit `for` attribute)
             if inp_id:
                 label = soup.find("label", attrs={"for": inp_id})
                 if label:
                     continue
+
+            # Check for wrapped/implicit label (<label><input> Text</label>)
+            parent_label = inp.find_parent("label")
+            if parent_label:
+                continue
 
             if has_aria_label:
                 continue

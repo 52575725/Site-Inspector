@@ -51,10 +51,25 @@ class BrokenLinksInspector(BaseInspector):
             links_to_check.append(("a_href", tag["href"]))
         for tag in soup.find_all("img", src=True):
             links_to_check.append(("img_src", tag["src"]))
+            # Also check srcset attributes on images
+            srcset = tag.get("srcset", "")
+            if srcset:
+                for part in srcset.split(","):
+                    url_part = part.strip().split(" ")[0]
+                    if url_part:
+                        links_to_check.append(("img_srcset", url_part))
         for tag in soup.find_all("link", href=True):
             links_to_check.append(("link_href", tag["href"]))
         for tag in soup.find_all("script", src=True):
             links_to_check.append(("script_src", tag["src"]))
+        for tag in soup.find_all("iframe", src=True):
+            links_to_check.append(("iframe_src", tag["src"]))
+        for tag in soup.find_all("video"):
+            src = tag.get("src")
+            if src:
+                links_to_check.append(("video_src", src))
+            for source in tag.find_all("source", src=True):
+                links_to_check.append(("video_source", source["src"]))
 
         # De-duplicate by absolute URL
         seen_urls: dict[str, tuple[str, str]] = {}

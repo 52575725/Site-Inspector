@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 RiskLevel = Literal["low", "medium", "high"]
 ExecutionMode = Literal["fully_auto", "semi_auto", "manual_required"]
+DecisionType = Literal[
+    "execute_automatically",
+    "request_approval",
+    "manual_implementation",
+]
 
 
 class TextReasoner(Protocol):
@@ -50,6 +55,10 @@ class PlannedAction(BaseModel):
     phase: int
     title: str
     rationale: str
+    problem_statement: str
+    proposed_solution: str
+    solution_steps: list[str] = Field(default_factory=list)
+    decision: DecisionType
     strategic_note: str = ""
     issue_ids: list[int]
     urls: list[str]
@@ -241,14 +250,30 @@ class SEOPlanningAgent:
         ranked_groups = sorted(
             groups.items(),
             key=lambda item: (
+                -max(self._decision_score(issue, context)[0] for issue in item[1]),
+                item[0][0],
+                item[0][1],
+            ),
+        )
+
+        mandatory = [
+            item for item in ranked_groups
+            if any(str(getattr(issue, "priority_tier", "P2")) == "P0" for issue in item[1])
+        ]
+        optional = [item for item in ranked_groups if item not in mandatory]
+        selected_by_value = (mandatory + optional)[: self.policy.max_actions]
+        kept_groups = sorted(
+            selected_by_value,
+            key=lambda item: (
                 item[0][0],
                 -max(self._decision_score(issue, context)[0] for issue in item[1]),
                 item[0][1],
             ),
         )
-
-        kept_groups = ranked_groups[: self.policy.max_actions]
-        for _, group_issues in ranked_groups[self.policy.max_actions :]:
+        selected_keys = {item[0] for item in selected_by_value}
+        for group_key, group_issues in ranked_groups:
+            if group_key in selected_keys:
+                continue
             deferred.extend(self._defer(issue, "plan action capacity reached") for issue in group_issues)
 
         actions: list[PlannedAction] = []
@@ -281,11 +306,16 @@ class SEOPlanningAgent:
                 and not protected
                 and not degraded_history
             )
+            decision = self._decision(mode, approval_required)
             actions.append(PlannedAction(
                 action_id=action_id,
                 phase=phase,
                 title=self._action_title(category, len(group_issues)),
                 rationale=self._rationale(category, group_issues),
+                problem_statement=self._problem_statement(category, group_issues),
+                proposed_solution=self._proposed_solution(category, fixer),
+                solution_steps=self._solution_steps(category, fixer),
+                decision=decision,
                 issue_ids=[item.issue_id for item in evidence],
                 urls=sorted({item.url for item in evidence}),
                 categories=[category],
@@ -341,6 +371,15 @@ class SEOPlanningAgent:
                 "signal_pages": len(context.page_signals),
                 "feedback_observations": sum(
                     feedback.total for feedback in context.category_feedback.values()
+                ),
+                "autonomous_actions": sum(
+                    action.decision == "execute_automatically" for action in actions
+                ),
+                "approval_actions": sum(
+                    action.decision == "request_approval" for action in actions
+                ),
+                "manual_actions": sum(
+                    action.decision == "manual_implementation" for action in actions
                 ),
             },
             actions=actions,
@@ -630,6 +669,70 @@ class SEOPlanningAgent:
             f"The scan found {len(issues)} evidence-backed {category} issue(s) "
             f"across {pages} page(s), prioritized as {', '.join(tiers)}."
         )
+
+    @staticmethod
+    def _decision(mode: ExecutionMode, approval_required: bool) -> DecisionType:
+        if not approval_required:
+            return "execute_automatically"
+        if mode == "manual_required":
+            return "manual_implementation"
+        return "request_approval"
+
+    @staticmethod
+    def _problem_statement(category: str, issues: Sequence[Any]) -> str:
+        pages = len({str(getattr(issue, "url", "")) for issue in issues})
+        examples = [
+            str(getattr(issue, "description", "") or "").strip()
+            for issue in issues[:2]
+            if str(getattr(issue, "description", "") or "").strip()
+        ]
+        observed = f" Examples: {'; '.join(examples)}" if examples else ""
+        return (
+            f"Detected {len(issues)} {category.replace('_', ' ')} issue(s) "
+            f"affecting {pages} page(s).{observed}"
+        )[:1000]
+
+    @staticmethod
+    def _proposed_solution(category: str, fixer: str | None) -> str:
+        if "robots" in category or "sitemap" in category:
+            solution = "Correct crawl directives and regenerate a resolvable, canonical sitemap"
+        elif "canonical" in category or "hreflang" in category:
+            solution = "Align canonical and language annotations with the final indexable URL set"
+        elif "title" in category or "meta_description" in category:
+            solution = "Rewrite the search snippet from verified page content and target intent"
+        elif any(token in category for token in ("content", "keyword", "cannibalization")):
+            solution = "Consolidate search intent and improve evidence-backed page content without inventing facts"
+        elif "schema" in category or "structured" in category:
+            solution = "Repair JSON-LD using only entities and properties verified on the page"
+        elif any(token in category for token in ("image", "lcp", "cls", "performance")):
+            solution = "Optimize media delivery and layout stability while preserving visual quality"
+        elif any(token in category for token in ("link", "orphan", "breadcrumb")):
+            solution = "Restore contextual internal navigation and crawlable page relationships"
+        elif any(token in category for token in ("mobile", "viewport", "accessibility", "wcag")):
+            solution = "Correct responsive and accessibility markup, then verify desktop and mobile rendering"
+        elif any(token in category for token in ("eeat", "freshness")):
+            solution = "Update trust and freshness signals from verifiable business and editorial evidence"
+        else:
+            solution = "Apply the matching remediation and validate that the detected condition is removed"
+        return f"{solution}. Recommended handler: {fixer}." if fixer else f"{solution}."
+
+    @staticmethod
+    def _solution_steps(category: str, fixer: str | None) -> list[str]:
+        steps = [
+            "Confirm the finding against the current source and rendered page",
+            "Capture a rollback snapshot before changing the source",
+        ]
+        if fixer:
+            steps.append(f"Apply the scoped change with {fixer}")
+        else:
+            steps.append("Prepare a reviewed manual change because no safe fixer is available")
+        steps.extend([
+            "Run category-specific validation and rendering checks",
+            "Measure the expected search or engagement metric after release",
+        ])
+        if any(token in category for token in ("content", "eeat", "freshness")):
+            steps.insert(2, "Verify every business claim against an approved source")
+        return steps
 
     @staticmethod
     def _expected_metrics(category: str) -> list[str]:

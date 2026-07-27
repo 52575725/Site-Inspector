@@ -363,8 +363,10 @@ class ScanOrchestrator:
         )
 
         await self.session.commit()
-        # Clear cached pages to free memory
-        self._last_crawled_pages = []
+        # NOTE: Do NOT clear _last_crawled_pages here — engine.run_quick_scan()
+        # reads it after run_full_scan() returns to build page_contents for
+        # inline fixes. Clearing it causes all quick-scan fixes to be silently
+        # skipped with "no content" errors.
         return scan
 
     @staticmethod

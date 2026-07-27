@@ -290,6 +290,7 @@ async def create_article_image_proposal(request: Request, body: ImageProposalReq
             original_path.unlink(missing_ok=True)
         downloaded.append({
             "local_path": f"/images/{asset_path.name}",
+            "query": query,
             "alt_text": result.alt_text or query,
             "caption": result.alt_text or query,
             "width": result.width or 1200,
@@ -319,6 +320,7 @@ async def create_article_image_proposal(request: Request, body: ImageProposalReq
             break
         downloaded.append({
             "local_path": f"/images/{generated_path.name}",
+            "query": query,
             "alt_text": query,
             "caption": query,
             "width": 1536,
@@ -345,6 +347,16 @@ async def create_article_image_proposal(request: Request, body: ImageProposalReq
     )
     if inserted != search["needed"]:
         raise HTTPException(status_code=422, detail="Could not place every selected image")
+    integrity_error = fixer._validate_document_integrity(
+        search["content"],
+        soup,
+        inserted,
+    )
+    if integrity_error:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Image insertion failed integrity validation: {integrity_error}",
+        )
 
     output_path = resolve_within(proposal_root, search["article_path"])
     output_path.parent.mkdir(parents=True, exist_ok=True)

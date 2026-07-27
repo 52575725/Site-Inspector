@@ -342,7 +342,7 @@ def schedule_list():
 
 @web_cmd.command("start")
 def web_start(
-    host: str = typer.Option("0.0.0.0", help="Bind address"),
+    host: str = typer.Option("127.0.0.1", help="Bind address (use 0.0.0.0 only with auth)"),
     port: int = typer.Option(8000, help="Port to listen on"),
     reload: bool = typer.Option(False, help="Enable auto-reload for development"),
 ):

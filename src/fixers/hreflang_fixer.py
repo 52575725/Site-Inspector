@@ -35,9 +35,12 @@ class HreflangFixer(BaseFixer):
                 error_message="No <head> element found",
             )
 
-        # Remove existing hreflang tags
+        # Remove only hreflang tags matching our configured languages,
+        # preserving manually-authored or third-party hreflang tags.
+        configured_langs = set(self.languages.keys())
         for existing in soup.find_all("link", rel="alternate"):
-            if existing.get("hreflang"):
+            hl = existing.get("hreflang", "")
+            if hl and hl != "x-default" and hl in configured_langs:
                 existing.decompose()
 
         # Add hreflang tags for all configured languages
@@ -106,4 +109,10 @@ class HreflangFixer(BaseFixer):
             if path.startswith(prefix_with_slash):
                 stripped = path[len(prefix_with_slash):]
                 return f"{base}/{stripped}"
-            return f"{base}/"
+            # Prefix stripping failed — keep the original path instead of
+            # dropping everything to root, which would create broken hreflangs.
+            logger.warning(
+                f"hreflang: path '{path}' doesn't start with expected prefix "
+                f"'{prefix_with_slash}', keeping original path"
+            )
+            return f"{base}{path}"

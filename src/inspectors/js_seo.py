@@ -83,7 +83,10 @@ class JSSeoInspector(BaseInspector):
         findings.extend(self._check_csr_mount_points(url, html_content))
 
         # ── 2. Content-to-HTML ratio analysis ───────────────────
-        findings.extend(self._check_content_ratio(url, soup, html_content, html_size))
+        # Pass a COPY of soup — this method decomposes script/style/noscript
+        # tags, but later methods (_check_inline_scripts, _check_noscript) need them.
+        content_soup = BeautifulSoup(str(soup), "html.parser")
+        findings.extend(self._check_content_ratio(url, content_soup, html_content, html_size))
 
         # ── 3. JS redirects in inline scripts ───────────────────
         findings.extend(self._check_js_redirects(url, html_content))

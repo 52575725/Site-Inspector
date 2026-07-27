@@ -88,7 +88,11 @@ class VerificationFixer(BaseFixer):
             )
 
         # Insert <meta name="xxx" content="code" /> in <head>
-        meta_tag = f'<meta name="{meta_name}" content="{code}" />'
+        import html as _html
+        meta_tag = (
+            f'<meta name="{_html.escape(meta_name, quote=True)}" '
+            f'content="{_html.escape(code, quote=True)}" />'
+        )
 
         # Check if already present
         if meta_tag in page_content:

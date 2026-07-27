@@ -201,19 +201,21 @@ class SEOInspector(BaseInspector):
         if not headings:
             return []
 
-        # Check for skipped levels
+        # Check for skipped levels — report ALL skips, not just the first
+        findings: list[RawFinding] = []
         prev = headings[0]
         for curr in headings[1:]:
             if curr > prev + 1:
-                return [RawFinding(
+                findings.append(RawFinding(
                     url=url, inspector=self.inspector_name,
                     category="h_tag_skip",
                     description=f"Heading level skip: H{prev} → H{curr}",
                     current_value=f"H{prev}→H{curr}",
-                )]
+                    suggested_value=f"H{prev+1}",
+                ))
             prev = curr
 
-        return []
+        return findings
 
     def _check_canonical(self, soup: BeautifulSoup, url: str) -> list[RawFinding]:
         canonical = soup.find("link", attrs={"rel": "canonical"})

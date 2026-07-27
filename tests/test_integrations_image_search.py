@@ -97,3 +97,42 @@ def test_visual_queries_vary_by_article_intent():
         "solar panels industry"
     )
     assert image_search._visual_query_for("LBMA silver bar purity") == "silver bullion ingot"
+
+
+def test_extract_keywords_prioritizes_places_transport_and_scenes():
+    html = """<html><head><title>Silver Shipping Guide</title></head><body><article>
+    <h1>Choosing an International Shipping Route</h1>
+    <p>Hong Kong exporters often use air freight through the airport.</p>
+    <p>Large orders can use sea freight and container ships.</p>
+    <p>At Rotterdam Port, customs clearance includes cargo inspection.</p>
+    </article></body></html>"""
+
+    queries = image_search.extract_keywords_from_html(html, max_queries=4)
+
+    assert any("Hong Kong" in query and "air cargo" in query for query in queries)
+    assert any("container ship" in query for query in queries)
+    assert any("Rotterdam Port" in query and "customs" in query for query in queries)
+
+
+def test_extract_visual_facets_recognizes_unlisted_named_place():
+    facets = image_search._extract_visual_facets(
+        "Cargo arrives at Rotterdam Port before entering a secure warehouse."
+    )
+
+    assert any("Rotterdam Port" in facet for facet in facets)
+
+
+def test_extract_visual_facets_recognizes_unlisted_route_locations():
+    facets = image_search._extract_visual_facets(
+        "Shipments travel from Antwerp to Busan by sea freight."
+    )
+
+    assert any("Antwerp" in facet for facet in facets)
+    assert any("Busan" in facet for facet in facets)
+
+
+def test_visual_query_keeps_location_context():
+    assert image_search._visual_query_for("Hong Kong air freight silver") == (
+        "Hong Kong cargo aircraft freight"
+    )
+    assert image_search._visual_query_for("Japan silver") == "Japan"

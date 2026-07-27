@@ -65,12 +65,23 @@ class CannibalizationDetector(BaseInspector):
     def __init__(self) -> None:
         self._page_data: list[dict] = []
         self._already_reported: set[str] = set()
+        self._soup_cache: dict[str, "BeautifulSoup"] = {}
 
     async def setup(self) -> None:
-        pass
+        self._soup_cache.clear()
 
     async def teardown(self) -> None:
-        pass
+        self._soup_cache.clear()
+
+    def set_page_data(self, pages: list[dict]) -> None:
+        """Pre-parse all page HTMLs once to avoid O(N²) BeautifulSoup parses."""
+        self._page_data = pages
+        self._soup_cache.clear()
+        for p in pages:
+            url = p.get("url", "")
+            html = p.get("html_content") or ""
+            if html:
+                self._soup_cache[url] = BeautifulSoup(html, "html.parser")
 
     def set_page_data(self, pages: list[dict]) -> None:
         """Receive all crawled page metadata for cross-site comparison.
@@ -113,8 +124,7 @@ class CannibalizationDetector(BaseInspector):
             if pair_key in self._already_reported:
                 continue
 
-            other_html = other.get("html_content") or ""
-            other_soup = BeautifulSoup(other_html, "html.parser") if other_html else None
+            other_soup = self._soup_cache.get(other_url)
 
             other_title = other.get("title") or (
                 self._extract_title(other_soup) if other_soup else ""

@@ -52,7 +52,23 @@ async def competitor_history(request: Request, url: str):
 async def convert_webp(request: Request, body: WebPRequest):
     """Batch-convert images in a directory to WebP format."""
     from src.integrations.image_webp import batch_convert_directory
-    results = batch_convert_directory(body.directory)
+    from src.sources.base import resolve_within
+    from pathlib import Path
+
+    # Prevent path traversal: only allow directories within data/
+    settings = request.app.state.settings
+    allowed_root = settings.data_dir.resolve()
+    dir_path = Path(body.directory).resolve()
+    try:
+        dir_path.relative_to(allowed_root)
+    except ValueError:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Directory must be within {allowed_root}",
+        )
+    if not dir_path.exists():
+        raise HTTPException(status_code=404, detail="Directory not found")
+    results = batch_convert_directory(str(dir_path))
     return results
 
 

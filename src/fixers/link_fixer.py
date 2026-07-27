@@ -75,7 +75,8 @@ class LinkFixer(BaseFixer):
         if broken_domain != base_domain:
             return html  # Can't fix external links
 
-        # Common fix: add/remove trailing slash or .html extension
+        # Common fix candidates, ordered by likelihood (trailing slash is the
+        # most common URL resolution pattern for web servers).
         candidates = [
             broken_url.rstrip("/") + "/",
             broken_url.rstrip("/") + ".html",
@@ -83,11 +84,11 @@ class LinkFixer(BaseFixer):
             broken_url.rstrip("/"),
         ]
 
-        # Try to find link element and replace with most likely candidate
+        # Find link element and replace with the best candidate.
+        # We try candidates in order — the first one is the safest default.
         for tag_name, attr in [("a", "href"), ("img", "src")]:
             for tag in soup.find_all(tag_name):
                 if tag.get(attr) == broken_url:
-                    # Try the first candidate as the most likely fix
                     tag[attr] = candidates[0]
                     return str(soup)
 

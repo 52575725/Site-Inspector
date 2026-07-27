@@ -87,16 +87,21 @@ class FreshnessFixer(BaseFixer):
         if not body:
             return page_content
 
-        # Update visible text
+        # Update visible text — only replace years in prose text,
+        # not inside <script>, <code>, <pre>, identifiers, or historical facts.
+        _skip_parents = {"script", "code", "pre", "style", "noscript"}
         for element in body.find_all(string=True):
             new_text = element
+            parent_name = getattr(element.parent, "name", "")
+            if parent_name in _skip_parents:
+                continue
             for year in stale_years:
-                # Replace patterns like "best of 2023" → "best of 2026"
-                # But NOT dates in URLs or structured data
-                if str(year) in new_text and element.parent.name != "script":
-                    new_text = new_text.replace(
-                        str(year), str(self._current_year),
-                    )
+                # Use word-boundary regex to avoid replacing years inside
+                # longer numbers (e.g. "12023" should not become "12026")
+                pattern = re.compile(rf"\b{year}\b")
+                new_text = pattern.sub(
+                    str(self._current_year), new_text,
+                )
             element.replace_with(new_text)
 
         # Also update meta description if it has old years
@@ -191,7 +196,7 @@ class FreshnessFixer(BaseFixer):
         from urllib.parse import urlparse
         path = urlparse(url).path.strip("/")
         if not path or path.endswith("/"):
-            return (path or "index") + "index.html"
+            return (path or "") + "index.html"
         if "." not in path.split("/")[-1]:
             return path + "/index.html"
         return path

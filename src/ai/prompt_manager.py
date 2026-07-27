@@ -52,10 +52,23 @@ class PromptManager:
 
         Business-config defaults (business_description, tone, etc.) are
         automatically merged — callers only need to pass page-specific vars.
+        Missing template variables are replaced with safe defaults instead of
+        raising KeyError.
         """
+        from string import Formatter
+
         # Merge: caller kwargs take priority over business defaults
         merged = {**self._business_defaults, **kwargs}
         task_config = self.get_prompt(task)
-        system = task_config["system"].format(**merged)
-        prompt = task_config["prompt"].format(**merged)
+
+        # Safe format: replace missing keys with "{key}" placeholder
+        def _safe_format(template: str) -> str:
+            result = template
+            for field_name, _, _, _ in Formatter().parse(template):
+                if field_name and field_name not in merged:
+                    merged.setdefault(field_name, f"{{{field_name}}}")
+            return template.format(**merged)
+
+        system = _safe_format(task_config["system"])
+        prompt = _safe_format(task_config["prompt"])
         return system, prompt

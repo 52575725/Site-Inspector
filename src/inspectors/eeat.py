@@ -164,9 +164,12 @@ class EEATInspector(BaseInspector):
             or soup.find("meta", attrs={"name": "author"})
         )
 
-        # Heuristic: look for "By [Name]" pattern near the top of the article
+        # Heuristic: multi-language byline patterns
         by_pattern = re.search(
-            r'(?:By|Written by|Author:|Author\s)\s*([A-Z][a-z]+(?:\s[A-Z][a-z]+){1,3})',
+            r'(?:By|Written\s+by|Author[:]|Author\s|作者[：:]|執筆者[：:]|著者[：:])\s*'
+            r'([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,4}'
+            r'|[A-Z][a-z]+(?:-[A-Z][a-z]+)?(?:\s[A-Z]\.)?(?:\s[A-Z][a-z]+){0,3}'
+            r'|[一-鿿぀-ゟ]{2,10})',
             soup.get_text(separator=" ", strip=True)[:2000],
         )
         has_visible_byline = bool(by_pattern)
@@ -471,10 +474,15 @@ class EEATInspector(BaseInspector):
         """Check whether the site has About, Contact, Privacy, Terms pages."""
         findings: list[RawFinding] = []
 
-        # Only report once per scan (not per page) — check if this is the first page
-        # We use a simple heuristic: report only from the root/homepage
+        # Only report once per scan — check from any page that looks like a
+        # homepage (root, language roots like /en/ or /jp/)
         path = urlparse(url).path.rstrip("/")
-        if path not in ("", "/"):
+        is_homepage = path in ("", "/")
+        if not is_homepage:
+            # Also match single-segment language paths: /en, /jp, /zh, etc.
+            segments = [s for s in path.split("/") if s]
+            is_homepage = len(segments) == 1 and len(segments[0]) <= 3
+        if not is_homepage:
             return findings
 
         for page_type, found_url in self._trust_pages.items():

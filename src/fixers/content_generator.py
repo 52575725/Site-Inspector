@@ -328,9 +328,12 @@ class ContentGenerator(BaseFixer):
                 new_div.append(BeautifulSoup(generated, "html.parser"))
                 insert_point.insert_after(new_div)
             else:
-                # Just set body content
-                body.clear()
-                body.append(BeautifulSoup(generated, "html.parser"))
+                # No semantic landmarks found — wrap generated content in a
+                # div and append to body instead of clearing the whole page.
+                wrapper = soup.new_tag("div")
+                wrapper["class"] = "generated-content"
+                wrapper.append(BeautifulSoup(generated, "html.parser"))
+                body.append(wrapper)
         else:
             if strategy == "enhance":
                 # Append to existing content

@@ -86,7 +86,6 @@ class OllamaClient:
                 "num_predict": max_tokens,
             },
         }
-        client = await self._get_client()
         resp = await client.post(f"{self.base_url}/api/generate", json=payload)
         resp.raise_for_status()
         return resp.json()["response"]
@@ -95,7 +94,6 @@ class OllamaClient:
         """Generate embedding vector for text."""
         client = await self._get_client()
         payload = {"model": self.embed_model, "input": text}
-        client = await self._get_client()
         resp = await client.post(f"{self.base_url}/api/embed", json=payload)
         resp.raise_for_status()
         return resp.json()["embeddings"][0]
