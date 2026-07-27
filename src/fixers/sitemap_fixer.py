@@ -14,7 +14,7 @@ class SitemapFixer(BaseFixer):
     """Auto-regenerate sitemap.xml: remove dead URLs, add missing pages."""
 
     fixer_name = "sitemap_fixer"
-    fix_type = "fully_auto"
+    fix_type = "semi_auto"
     supported_categories = [
         "sitemap_dead_url", "sitemap_missing_url",
         "sitemap_missing_hreflang", "sitemap_missing",

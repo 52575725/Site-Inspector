@@ -19,6 +19,10 @@ are disabled in the web application by default, and only deterministic
   HowTo JSON-LD inspection and generation.
 - Images and performance: alt text analysis, image optimization, WebP support,
   Lighthouse integration, and mobile CSS checks.
+- Article media: searches licensed providers for 3-4 topic-relevant images,
+  stores attribution and license links, converts downloads to WebP, and proposes
+  section-aware placement for editorial review. AI generation is off by default
+  and is used only as an explicitly enabled fallback when search is insufficient.
 - Controlled remediation: dry runs, approval classification, per-page fix
   limits, pre-change snapshots, validation, rollback, Git branches, and PRs.
 - Evidence-bound planning: a deterministic SEO Planning Agent orders work by
@@ -94,6 +98,29 @@ Keep repository writes disabled until a dry run and review have succeeded:
 ```dotenv
 SI_WEB_ALLOW_REPO_WRITES=false
 ```
+
+Configure one or more image search providers. Wikimedia Commons works without
+an API key; provider keys generally improve relevance and coverage:
+
+```dotenv
+SI_UNSPLASH_API_KEY=
+SI_PEXELS_API_KEY=
+SI_PIXABAY_API_KEY=
+SI_ARTICLE_IMAGE_COUNT=4
+```
+
+AI image fallback remains disabled unless both settings below are supplied.
+Search is always attempted first:
+
+```dotenv
+SI_IMAGE_GENERATION_ENABLED=false
+SI_OPENAI_API_KEY=
+SI_IMAGE_GENERATION_MODEL=gpt-image-2
+```
+
+Article image changes use the `semi_auto` approval class and are only proposed
+during a dry run. Review subject relevance, factual accuracy, crop, attribution,
+and license terms before merging.
 
 ## Run
 

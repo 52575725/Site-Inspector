@@ -79,7 +79,7 @@ async def test_invalid_json_reports_error(sd_validator):
     </script>
     </head><body></body></html>"""
     findings = await sd_validator.inspect("https://example.com/", html)
-    assert any(f.category == "schema_invalid_value" for f in findings)
+    assert any(f.category == "invalid_jsonld" for f in findings)
 
 
 @pytest.mark.asyncio

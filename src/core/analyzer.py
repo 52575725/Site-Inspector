@@ -34,13 +34,18 @@ class Analyzer:
         "missing_title": 0.95,
         "title_too_short": 0.55,
         "title_too_long": 0.50,
+        "title_truncated": 0.75,
         "missing_meta_description": 0.50,
         "meta_description_too_short": 0.35,
         "meta_description_too_long": 0.30,
+        "meta_description_truncated": 0.55,
+        "meta_description_boilerplate": 0.50,
         "missing_h1": 0.90,
         "multiple_h1": 0.75,
+        "hidden_seo_text": 0.85,
         "h_tag_skip": 0.70,
         "missing_canonical": 0.70,
+        "canonical_mismatch": 0.85,
         "missing_hreflang": 0.80,
         "incomplete_hreflang": 0.75,
         "missing_og_tags": 0.45,
@@ -122,6 +127,7 @@ class Analyzer:
         "image_not_webp": 0.35,
         "image_no_async_decoding": 0.25,
         "large_images": 0.55,  # oversized images hurt LCP
+        "article_image_shortage": 0.35,
         "competitor_page_changed": 0.80,  # competitor made SEO moves
         # Geo tags
         "missing_geo_region": 0.45,

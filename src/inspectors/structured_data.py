@@ -99,7 +99,7 @@ class StructuredDataValidator(BaseInspector):
             except (json.JSONDecodeError, TypeError):
                 findings.append(RawFinding(
                     url=url, inspector=self.inspector_name,
-                    category="schema_invalid_value",
+                    category="invalid_jsonld",
                     description="JSON-LD script contains invalid JSON",
                     element=str(script)[:200],
                 ))

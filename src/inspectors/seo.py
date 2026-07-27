@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
@@ -64,6 +64,7 @@ class SEOInspector(BaseInspector):
         findings.extend(self._check_image_seo(soup, url))
         findings.extend(self._check_internal_links(soup, url))
         findings.extend(self._check_geo_tags(soup, url))
+        findings.extend(self._check_hidden_text(soup, url))
 
         return findings
 
@@ -91,6 +92,14 @@ class SEOInspector(BaseInspector):
                 url=url, inspector=self.inspector_name,
                 category="title_too_long",
                 description=f"Title is too long ({len(title)} chars, max 60): '{title}'",
+                current_value=title,
+            ))
+
+        if re.search(r"(?:\.\.\.|\u2026)\s*$", title):
+            findings.append(RawFinding(
+                url=url, inspector=self.inspector_name,
+                category="title_truncated",
+                description="Title ends with an ellipsis and appears mechanically truncated",
                 current_value=title,
             ))
 
@@ -123,6 +132,24 @@ class SEOInspector(BaseInspector):
                 current_value=content,
             ))
 
+        if re.search(r"(?:\.\.\.|\u2026)\s*$", content):
+            findings.append(RawFinding(
+                url=url, inspector=self.inspector_name,
+                category="meta_description_truncated",
+                description="Meta description ends with an ellipsis and appears mechanically truncated",
+                current_value=content,
+            ))
+
+        nav_tokens = {"home", "products", "about", "contact", "insights", "en", "jp"}
+        normalized_words = set(re.findall(r"[a-z]+", content.lower()))
+        if len(nav_tokens & normalized_words) >= 5:
+            findings.append(RawFinding(
+                url=url, inspector=self.inspector_name,
+                category="meta_description_boilerplate",
+                description="Meta description appears to contain navigation boilerplate",
+                current_value=content,
+            ))
+
         return findings
 
     def _check_h1(self, soup: BeautifulSoup, url: str) -> list[RawFinding]:
@@ -140,6 +167,30 @@ class SEOInspector(BaseInspector):
                 description=f"Page has {len(h1_tags)} H1 tags (should have exactly 1)",
             )]
         return []
+
+    def _check_hidden_text(self, soup: BeautifulSoup, url: str) -> list[RawFinding]:
+        findings = []
+        for element in soup.find_all(True):
+            style = re.sub(r"\s+", "", element.get("style", "").lower())
+            aria_hidden = element.get("aria-hidden", "").lower() == "true"
+            visually_hidden = any(token in style for token in (
+                "display:none", "visibility:hidden", "opacity:0",
+                "left:-9999", "left:-10000", "clip:rect(0,0,0,0)",
+            ))
+            if not (aria_hidden or visually_hidden):
+                continue
+            text = " ".join(element.get_text(" ", strip=True).split())
+            if len(text) < 120 or not element.find(["h1", "h2", "h3", "p"]):
+                continue
+            findings.append(RawFinding(
+                url=url, inspector=self.inspector_name,
+                category="hidden_seo_text",
+                description="Substantial crawlable text is visually hidden and may be treated as spam",
+                element=str(element)[:300],
+                current_value=text[:200],
+            ))
+            break
+        return findings
 
     def _check_heading_hierarchy(self, soup: BeautifulSoup, url: str) -> list[RawFinding]:
         headings: list[int] = []
@@ -172,6 +223,15 @@ class SEOInspector(BaseInspector):
                 category="missing_canonical",
                 description="Page has no canonical URL",
             )]
+        href = urljoin(url, canonical.get("href", "").strip())
+        if self._normalize_url(href) != self._normalize_url(url):
+            return [RawFinding(
+                url=url, inspector=self.inspector_name,
+                category="canonical_mismatch",
+                description=f"Canonical URL does not match the crawled page: {href}",
+                current_value=href,
+                suggested_value=url,
+            )]
         return []
 
     def _check_hreflang(self, soup: BeautifulSoup, url: str) -> list[RawFinding]:
@@ -194,8 +254,9 @@ class SEOInspector(BaseInspector):
         # Check for reciprocal hreflang across all configured languages
         present_langs = {h.get("hreflang") for h in hreflangs}
         expected_langs = set(langs_config.keys())
-        if present_langs != expected_langs:
-            missing = expected_langs - present_langs
+        language_tags = present_langs - {"x-default"}
+        if language_tags != expected_langs:
+            missing = expected_langs - language_tags
             extra = present_langs - expected_langs - {"x-default"}
             parts = []
             if missing:
@@ -211,6 +272,14 @@ class SEOInspector(BaseInspector):
             )]
 
         return []
+
+    @staticmethod
+    def _normalize_url(value: str) -> str:
+        parts = urlsplit(value)
+        path = parts.path or "/"
+        if path != "/":
+            path = path.rstrip("/")
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
 
     def _check_og_tags(self, soup: BeautifulSoup, url: str) -> list[RawFinding]:
         required_og = ["og:title", "og:description", "og:image", "og:url", "og:type"]
