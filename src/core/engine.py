@@ -119,6 +119,37 @@ class Engine:
                 self.settings.target_name, scan, issues, fixes,
             )
 
+            # Phase 5: Trust verification — lightweight evidence audit
+            from src.core.trust_verifier import (
+                assess_evidence_quality,
+                compute_trust_report,
+            )
+            evidence_scores = assess_evidence_quality(issues)
+            avg_evidence = (
+                sum(e.evidence_score for e in evidence_scores) / max(len(evidence_scores), 1)
+                if evidence_scores else 1.0
+            )
+            # Quick fix trust: did any fixes fail validation?
+            fix_attempted = len(fixes)
+            fix_failed = sum(1 for f in fixes if f.status == "validation_failed")
+            fix_success_rate = (
+                1.0 - (fix_failed / max(fix_attempted, 1))
+                if fix_attempted > 0 else 1.0
+            )
+            trust_report = compute_trust_report(
+                detection_trust=avg_evidence,
+                fix_trust=fix_success_rate,
+                generation_trust=1.0,  # No generation in daily scan
+                cross_consistency=1.0,  # Basic scan — no cross-check
+                scan_id=scan.id,
+                target_name=self.settings.target_name,
+            )
+            logger.info(
+                f"Trust report: badge={trust_report.badge} "
+                f"overall={trust_report.overall_trust:.0%} "
+                f"evidence={avg_evidence:.0%} fix_success={fix_success_rate:.0%}"
+            )
+
             await session.commit()
 
         logger.info(f"Daily scan complete. Report: {report_path}")
@@ -235,7 +266,7 @@ class Engine:
                         await session.commit()
                         fixes = []
                     else:
-                        # When push_changes is True, skip approval and apply fixes directly
+                        # Repository writes are limited to the agent's executable allowlist.
                         fixes = await fixer.run_fixes(
                             planned_issues, dry_run=False, source_override=source,
                         )

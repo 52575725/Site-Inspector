@@ -108,6 +108,60 @@ async def batch_generate_articles(request: Request, body: BatchGenerateRequest):
     return {"total": len(body.topics), "generated": sum(1 for r in results if r["status"] == "ok"), "results": results}
 
 
+# ── Translation helpers ──────────────────────────────────────────────
+
+LANG_NAMES = {
+    "en": "English", "ja": "Japanese", "zh": "Chinese",
+    "ko": "Korean", "fr": "French", "de": "German",
+    "es": "Spanish", "pt": "Portuguese", "ru": "Russian",
+    "ar": "Arabic", "vi": "Vietnamese", "th": "Thai",
+}
+
+
+async def _do_translate(
+    settings, html_content: str, source_lang: str, target_lang: str,
+    lang_names: dict, label: str = "",
+) -> str:
+    """Call DeepSeek API to translate an HTML fragment.
+
+    Returns the translated HTML string.
+    """
+    import httpx
+    src_name = lang_names.get(source_lang, source_lang.upper())
+    tgt_name = lang_names.get(target_lang, target_lang.upper())
+
+    prompt = f"""Translate the following HTML from {src_name} to {tgt_name}.
+CRITICAL RULES:
+- Keep ALL HTML tags, attributes, and structure exactly as-is
+- Translate EVERY visible text between tags — no exceptions
+- Keep proper nouns (company names, person names, brand names) in original form
+- Output ONLY the translated HTML — no markdown fences, no notes, no explanations
+
+HTML to translate:
+{html_content}"""
+
+    api_key = settings.deepseek_api_key
+    async with httpx.AsyncClient(timeout=180) as client:
+        resp = await client.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": settings.deepseek_model,
+                "messages": [
+                    {"role": "system", "content": f"Professional {src_name}→{tgt_name} translator. Output only translated HTML with identical structure."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.3, "max_tokens": 16384,
+            },
+        )
+        resp.raise_for_status()
+        raw = resp.json()["choices"][0]["message"]["content"]
+
+    result = _extract_html(raw)
+    logger.info(f"Translated {len(html_content)}→{len(result)} chars {label}")
+    return result
+
+
 @router.post("/api/articles/translate")
 async def translate_article(request: Request, body: TranslateRequest):
     """Translate an existing HTML article to another language using AI."""
@@ -129,53 +183,79 @@ async def translate_article(request: Request, body: TranslateRequest):
 
     source_html = source_file.read_text(encoding="utf-8")
 
-    lang_names = {
-        "en": "English", "ja": "Japanese", "zh": "Chinese",
-        "ko": "Korean", "fr": "French", "de": "German",
-        "es": "Spanish", "pt": "Portuguese", "ru": "Russian",
-        "ar": "Arabic", "vi": "Vietnamese", "th": "Thai",
-    }
-    src_name = lang_names.get(body.source_lang, body.source_lang.upper())
-    tgt_name = lang_names.get(body.target_lang, body.target_lang.upper())
+    # ── For large pages, extract body content and translate section-by-section ──
+    from bs4 import BeautifulSoup
+    source_soup = BeautifulSoup(source_html, "html.parser")
 
-    prompt = f"""Translate EVERY part of the following HTML article from {src_name} to {tgt_name}.
-You MUST translate ALL sections, paragraphs, headings, lists, and table content.
-Do NOT summarize, skip, or truncate anything.
+    # Extract main content (skip nav/footer/header/scripts)
+    html_body = source_soup.find("body")
+    if not html_body:
+        raise HTTPException(status_code=400, detail="Source file has no <body>")
 
-CRITICAL RULES:
-- Keep ALL HTML tags, attributes, and structure exactly as-is
-- Translate EVERY visible text between tags — no exceptions
-- Translate all headings (h1, h2, h3, h4), all paragraphs, all list items, all table cells
-- Keep proper nouns (company names, person names, brand names) in original form
-- Translate meta description, OG tags, title, and alt text
-- Keep hreflang, canonical URLs, schema/JSON-LD markup unchanged
-- Output ONLY the complete translated HTML — no markdown fences, no notes
+    # Remove non-translatable elements
+    for tag in html_body.find_all(["script", "style", "noscript", "iframe"]):
+        tag.decompose()
 
-HTML to translate (FULL — do not skip any part):
-{source_html}"""
+    # Collect content sections to translate
+    sections: list[str] = []
+    for tag in html_body.find_all(["h1", "h2", "h3", "h4", "p", "ul", "ol", "li", "blockquote", "table"]):
+        text = tag.get_text(strip=True)
+        if text and len(text) > 3:
+            sections.append(str(tag))
 
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=180) as client:
-            resp = await client.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": settings.deepseek_model,
-                    "messages": [
-                        {"role": "system", "content": f"You are a professional {src_name}→{tgt_name} translator. You translate HTML while preserving all tags and structure exactly. Output only the translated HTML."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": 0.3, "max_tokens": 32768,
-                },
+    total_chars = sum(len(s) for s in sections)
+    logger.info(f"Translation: {len(sections)} content sections, {total_chars} total chars from {body.source_path}")
+
+    # If total is under 60000 chars, translate all at once
+    # Otherwise, chunk into batches of ~40000 chars
+    MAX_BATCH_CHARS = 40000
+    translated_sections: list[str] = []
+
+    if total_chars <= MAX_BATCH_CHARS * 1.5:
+        # Single-pass translation
+        content_html = "\n".join(sections)
+        translated_html = await _do_translate(
+            settings, content_html, body.source_lang, body.target_lang,
+            LANG_NAMES, body.source_path,
+        )
+        translated_sections = [translated_html]
+    else:
+        # Chunked translation
+        batches: list[list[str]] = []
+        current_batch: list[str] = []
+        current_chars = 0
+        for s in sections:
+            if current_chars + len(s) > MAX_BATCH_CHARS and current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_chars = 0
+            current_batch.append(s)
+            current_chars += len(s)
+        if current_batch:
+            batches.append(current_batch)
+
+        logger.info(f"Chunked translation: {len(batches)} batches")
+        for i, batch in enumerate(batches):
+            batch_html = "\n".join(batch)
+            chunk_translated = await _do_translate(
+                settings, batch_html, body.source_lang, body.target_lang,
+                LANG_NAMES, f"{body.source_path} (part {i+1}/{len(batches)})",
             )
-            resp.raise_for_status()
-            raw = resp.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        logger.error(f"Translation failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="翻译失败，请稍后重试")
+            translated_sections.append(chunk_translated)
 
-    translated_html = _extract_html(raw)
+    # Combine translated content back into the original HTML structure
+    final_soup = BeautifulSoup(source_html, "html.parser")
+    final_body = final_soup.find("body")
+    if final_body:
+        # Replace body content with translated version
+        combined = BeautifulSoup(
+            "\n".join(translated_sections), "html.parser",
+        )
+        final_body.clear()
+        for child in list(combined.children):
+            final_body.append(child)
+
+    translated_html = str(final_soup)
 
     # Save
     article_id = __import__("uuid").uuid4().hex[:12]
@@ -231,13 +311,47 @@ async def find_missing_translations(request: Request):
         prefix = path.strip("/")
         lang_prefix[lang] = prefix
 
-    # Collect all HTML files with their detected language
+    # Content page patterns — only these are considered "translatable content"
+    # Excludes: products, about, contact, privacy, terms, home, legal, error pages
+    CONTENT_PATTERNS = [
+        "/blog/", "/insights/", "/guide/", "/article/", "/news/",
+        "/tutorial/", "/market/", "/analysis/", "/report/", "/case-study/",
+        "/whitepaper/", "/resources/",
+    ]
+    EXCLUDE_PATTERNS = [
+        "/products/", "/about/", "/contact/", "/privacy/", "/terms/",
+        "/legal/", "/cookies/", "/faq/", "/careers/", "/jobs/",
+        "/search/", "/login/", "/signup/", "/cart/", "/checkout/",
+        "google", "sitemap", "robots",  # exclude verification pages
+    ]
+
+    def _is_content_page(rel_path: str) -> bool:
+        """Check if a path looks like a translatable content page."""
+        path_lower = rel_path.lower()
+        # Must match a content pattern
+        if not any(p in path_lower for p in CONTENT_PATTERNS):
+            return False
+        # Must NOT match any exclude pattern
+        if any(p in path_lower for p in EXCLUDE_PATTERNS):
+            return False
+        # Must be an HTML page, not a directory index without content
+        if path_lower.endswith("/index.html"):
+            # OK — could be blog index or article
+            pass
+        return True
+
+    # Collect all content HTML files with their detected language
     all_files: list[dict] = []
     for f in base.rglob("*.html"):
         rel = str(f.relative_to(base)).replace("\\", "/")
 
+        # ── Filter: only content pages ──
+        if not _is_content_page(rel):
+            continue
+
         # Detect language from html lang attribute
         detected_lang = None
+        content = None
         try:
             content = f.read_text(encoding="utf-8")
             m = re.search(r'<html[^>]*lang=["\']([a-z]{2})["\']', content, re.I)
@@ -259,10 +373,29 @@ async def find_missing_translations(request: Request):
                     path_lang = lang
                     break
 
+        # Extract title for preview
+        page_title = ""
+        word_count = 0
+        if content:
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(content, "html.parser")
+                title_tag = soup.find("title")
+                if title_tag:
+                    page_title = title_tag.get_text(strip=True)[:120]
+                for t in soup(["script", "style", "nav", "footer", "header"]):
+                    t.decompose()
+                body_text = soup.get_text(separator=" ", strip=True)
+                word_count = len(body_text.split())
+            except Exception:
+                pass
+
         all_files.append({
             "path": rel,
             "lang": detected_lang or path_lang or "unknown",
             "path_lang": path_lang,
+            "title": page_title,
+            "word_count": word_count,
         })
 
     # Group by "content slug" — the path minus any language prefix
