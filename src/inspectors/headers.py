@@ -78,11 +78,27 @@ class HeadersInspector(BaseInspector):
 
     inspector_name = "headers"
 
+    # Server-level categories: reported ONCE per scan, not per page
+    SERVER_LEVEL_CATEGORIES: set[str] = {
+        "missing_strict_transport_security", "hsts_max_age_too_short",
+        "missing_content_security_policy", "missing_x_frame_options",
+        "missing_x_frame_options_with_csp", "missing_x_content_type_options",
+        "missing_referrer_policy", "missing_permissions_policy",
+        "missing_cross_origin_opener_policy", "missing_cross_origin_resource_policy",
+        "missing_cross_origin_embedder_policy", "info_leak_server",
+        "info_leak_x_powered_by", "info_leak_x_aspnet_version",
+        "info_leak_x_generator", "info_leak_x_drupal_cache",
+        "info_leak_x_drupal_dynamic_cache", "missing_compression",
+        "headers_no_response_headers",
+    }
+
     def __init__(self) -> None:
         self._checked_urls: Set[str] = set()
+        self._reported_server_categories: set[str] = set()
 
     async def setup(self) -> None:
-        pass
+        self._reported_server_categories.clear()
+        self._checked_urls.clear()
 
     async def teardown(self) -> None:
         pass

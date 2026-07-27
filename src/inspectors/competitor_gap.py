@@ -7,6 +7,7 @@ description, word count, heading structure, schema types, and keywords.
 
 from __future__ import annotations
 
+import asyncio
 import json as json_mod
 import logging
 import re
