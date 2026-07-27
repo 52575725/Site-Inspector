@@ -198,10 +198,9 @@ class SitemapInspector(BaseInspector):
 
     @staticmethod
     def _normalize_urls(urls: list[str]) -> set[str]:
-        """Normalize URLs for comparison: strip trailing slash."""
+        """Normalize URLs to one identity instead of inventing slash variants."""
         result = set()
         for u in urls:
-            u = u.rstrip("/")
-            result.add(u)
-            result.add(u + "/")
+            normalized = u.rstrip("/") or u
+            result.add(normalized)
         return result

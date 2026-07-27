@@ -12,9 +12,9 @@ class CanonicalFixer(BaseFixer):
     """Auto-fix missing or incorrect canonical URLs."""
 
     fixer_name = "canonical_fixer"
-    fix_type = "fully_auto"
+    fix_type = "semi_auto"
     supported_categories = [
-        "missing_canonical",
+        "missing_canonical", "canonical_mismatch",
     ]
 
     async def generate_fix(

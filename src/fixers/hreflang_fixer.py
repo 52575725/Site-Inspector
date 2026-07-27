@@ -13,11 +13,11 @@ class HreflangFixer(BaseFixer):
     """Auto-fix hreflang alternate links for bilingual sites."""
 
     fixer_name = "hreflang_fixer"
-    fix_type = "fully_auto"
+    fix_type = "semi_auto"
     supported_categories = ["missing_hreflang", "incomplete_hreflang"]
 
     def __init__(self, languages: dict | None = None):
-        self.languages = languages or {"en": "/", "jp": "/jp/"}
+        self.languages = languages or {"en": "/", "ja": "/jp/"}
 
     async def generate_fix(self, issue: dict, source: BaseSource,
                            page_content: str) -> FixResult:

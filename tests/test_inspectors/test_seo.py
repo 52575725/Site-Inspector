@@ -103,3 +103,44 @@ async def test_detects_missing_structured_data(seo_inspector):
 async def test_empty_page(seo_inspector):
     findings = await seo_inspector.inspect("https://example.com", "")
     assert any(f.category == "empty_page" for f in findings)
+
+
+@pytest.mark.asyncio
+async def test_detects_literal_title_and_description_ellipsis(seo_inspector):
+    html = """<html><head><title>A useful silver jewelry guide...</title>
+    <meta name="description" content="Learn how to choose sterling silver jewelry...">
+    </head><body><h1>Silver guide</h1></body></html>"""
+    findings = await seo_inspector.inspect("https://example.com/guide", html)
+    categories = {finding.category for finding in findings}
+    assert "title_truncated" in categories
+    assert "meta_description_truncated" in categories
+
+
+@pytest.mark.asyncio
+async def test_detects_canonical_mismatch(seo_inspector):
+    html = """<html><head><title>Silver Jewelry Product Guide</title>
+    <link rel="canonical" href="https://example.com/wrong-page/">
+    </head><body><h1>Silver guide</h1></body></html>"""
+    findings = await seo_inspector.inspect("https://example.com/guide/", html)
+    assert any(finding.category == "canonical_mismatch" for finding in findings)
+
+
+@pytest.mark.asyncio
+async def test_hreflang_accepts_x_default(seo_inspector):
+    seo_inspector.set_target_languages({"en": "/", "ja": "/jp/"})
+    html = """<html><head><title>Silver Jewelry Product Guide</title>
+    <link rel="alternate" hreflang="en" href="https://example.com/guide/">
+    <link rel="alternate" hreflang="ja" href="https://example.com/jp/guide/">
+    <link rel="alternate" hreflang="x-default" href="https://example.com/guide/">
+    </head><body><h1>Silver guide</h1></body></html>"""
+    findings = await seo_inspector.inspect("https://example.com/guide/", html)
+    assert not any(finding.category == "incomplete_hreflang" for finding in findings)
+
+
+@pytest.mark.asyncio
+async def test_detects_substantial_hidden_seo_text(seo_inspector):
+    hidden = " ".join(["wholesale sterling silver jewelry supplier"] * 25)
+    html = f"""<html><head><title>Silver Jewelry Product Guide</title></head>
+    <body><h1>Silver guide</h1><div style="display:none"><p>{hidden}</p></div></body></html>"""
+    findings = await seo_inspector.inspect("https://example.com/guide/", html)
+    assert any(finding.category == "hidden_seo_text" for finding in findings)

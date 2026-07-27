@@ -24,8 +24,8 @@ class Settings(BaseSettings):
 
     # Target
     target_name: str = "helinsilver"
-    target_base_url: str = "https://www.helinsilver.com"
-    target_languages: list[str] = ["en", "jp"]
+    target_base_url: str = "https://helinsilver.com"
+    target_languages: list[str] = ["en", "ja"]
 
     # Source
     source_type: str = "http"
@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     unsplash_api_key: str = ""
     pexels_api_key: str = ""
     pixabay_api_key: str = ""
+
+    # Optional AI fallback for article images. Search providers are always tried first.
+    openai_api_key: str = ""
+    image_generation_enabled: bool = False
+    image_generation_model: str = "gpt-image-2"
+    article_image_count: int = 4
 
     # Crawling
     crawl_rate: float = 0.5

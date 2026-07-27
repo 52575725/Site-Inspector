@@ -27,6 +27,9 @@ class ImageResult:
     source: str        # "unsplash", "pexels", "pixabay"
     width: int = 0
     height: int = 0
+    page_url: str = ""
+    license_name: str = ""
+    license_url: str = ""
 
 
 # ── Public API ──────────────────────────────────────────────────────────
@@ -52,7 +55,7 @@ def search_images(
     """
     results: list[ImageResult] = []
 
-    # Try Unsplash first (best quality, works without key for public access)
+    # Use official providers only. Random placeholder services are not search.
     try:
         unsplash = _search_unsplash(query, count, unsplash_key)
         results.extend(unsplash)
@@ -61,7 +64,7 @@ def search_images(
         logger.debug(f"Unsplash failed: {e}")
 
     if len(results) >= count:
-        return results[:count]
+        return _deduplicate(results)[:count]
 
     # Pexels fallback
     remaining = count - len(results)
@@ -73,7 +76,7 @@ def search_images(
         logger.debug(f"Pexels failed: {e}")
 
     if len(results) >= count:
-        return results[:count]
+        return _deduplicate(results)[:count]
 
     # Pixabay fallback
     remaining = count - len(results)
@@ -84,7 +87,28 @@ def search_images(
     except Exception as e:
         logger.debug(f"Pixabay failed: {e}")
 
-    return results[:count]
+    if len(results) < count:
+        remaining = count - len(results)
+        try:
+            commons = _search_wikimedia(query, remaining)
+            results.extend(commons)
+            logger.info(f"Wikimedia Commons: {len(commons)} results for '{query}'")
+        except Exception as e:
+            logger.debug(f"Wikimedia Commons failed: {e}")
+
+    return _deduplicate(results)[:count]
+
+
+def _deduplicate(results: list[ImageResult]) -> list[ImageResult]:
+    unique = []
+    seen = set()
+    for result in results:
+        key = result.url.split("?")[0]
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(result)
+    return unique
 
 
 def download_image(url: str, dest_dir: str | Path, filename: str | None = None) -> str | None:
@@ -158,15 +182,16 @@ def extract_keywords_from_html(html_content: str, max_queries: int = 3) -> list[
         if h1_text and len(h1_text) > 10 and h1_text not in queries:
             queries.append(h1_text)
 
-    # 3. Combine first H2 with title for a specific query
+    # 3. Use section headings so each image can match a different part of the article.
     h2_tags = soup.find_all("h2")
-    for h2 in h2_tags[:3]:
+    for h2 in h2_tags:
         h2_text = h2.get_text(strip=True)
         if h2_text and len(h2_text) > 5:
             # Use H2 as a standalone query if distinct enough
             if h2_text not in " ".join(queries):
                 queries.append(h2_text)
-            break
+            if len(queries) >= max_queries:
+                break
 
     # Truncate to max
     result = queries[:max_queries]
@@ -217,25 +242,12 @@ def _search_unsplash(query: str, count: int, api_key: str = "") -> list[ImageRes
                 source="unsplash",
                 width=photo.get("width", 0),
                 height=photo.get("height", 0),
+                page_url=photo.get("links", {}).get("html", ""),
+                license_name="Unsplash License",
+                license_url="https://unsplash.com/license",
             ))
         return results
-    else:
-        # No API key: use Lorem Picsum as fallback (always available, free)
-        # Each unique seed gives a different image
-        results: list[ImageResult] = []
-        for i in range(count):
-            seed = abs(hash(f"{query}-{i}")) % 1000
-            img_url = f"https://picsum.photos/seed/{seed}/1200/630"
-            results.append(ImageResult(
-                url=img_url,
-                thumb_url=f"https://picsum.photos/seed/{seed}/400/210",
-                alt_text=query,
-                photographer="Lorem Picsum",
-                source="unsplash",
-                width=1200,
-                height=630,
-            ))
-        return results
+    return []
 
 
 def _search_pexels(query: str, count: int, api_key: str = "") -> list[ImageResult]:
@@ -269,7 +281,67 @@ def _search_pexels(query: str, count: int, api_key: str = "") -> list[ImageResul
             source="pexels",
             width=photo.get("width", 0),
             height=photo.get("height", 0),
+            page_url=photo.get("url", ""),
+            license_name="Pexels License",
+            license_url="https://www.pexels.com/license/",
         ))
+    return results
+
+
+def _search_wikimedia(query: str, count: int) -> list[ImageResult]:
+    """Search Wikimedia Commons for attributable, reusable images."""
+    import html
+    import json
+    import re
+    import urllib.request
+
+    url = (
+        "https://commons.wikimedia.org/w/api.php?action=query&generator=search"
+        f"&gsrsearch={quote('file:' + query)}&gsrnamespace=6&gsrlimit={min(max(count * 3, 6), 30)}"
+        "&prop=imageinfo&iiprop=url%7Cmime%7Cextmetadata&iiurlwidth=1200"
+        "&format=json&origin=*"
+    )
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "SiteInspector/1.0 (article image research)",
+    })
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+
+    results = []
+    pages = data.get("query", {}).get("pages", {})
+    for page in pages.values():
+        info_list = page.get("imageinfo") or []
+        if not info_list:
+            continue
+        info = info_list[0]
+        if info.get("mime") not in {"image/jpeg", "image/png", "image/webp"}:
+            continue
+        metadata = info.get("extmetadata") or {}
+
+        def meta(name: str) -> str:
+            value = metadata.get(name, {}).get("value", "")
+            value = re.sub(r"<[^>]+>", " ", value)
+            return " ".join(html.unescape(value).split())
+
+        title = page.get("title", "").removeprefix("File:")
+        description = meta("ImageDescription") or title or query
+        license_name = meta("LicenseShortName") or meta("UsageTerms")
+        if not license_name:
+            continue
+        results.append(ImageResult(
+            url=info.get("thumburl") or info.get("url", ""),
+            thumb_url=info.get("thumburl") or info.get("url", ""),
+            alt_text=description[:180],
+            photographer=meta("Artist") or "Wikimedia Commons contributor",
+            source="wikimedia",
+            width=info.get("thumbwidth", 0),
+            height=info.get("thumbheight", 0),
+            page_url=f"https://commons.wikimedia.org/?curid={page.get('pageid', '')}",
+            license_name=license_name,
+            license_url=metadata.get("LicenseUrl", {}).get("value", ""),
+        ))
+        if len(results) >= count:
+            break
     return results
 
 
@@ -301,5 +373,8 @@ def _search_pixabay(query: str, count: int, api_key: str = "") -> list[ImageResu
             source="pixabay",
             width=hit.get("imageWidth", 0),
             height=hit.get("imageHeight", 0),
+            page_url=hit.get("pageURL", ""),
+            license_name="Pixabay Content License",
+            license_url="https://pixabay.com/service/license-summary/",
         ))
     return results

@@ -84,13 +84,36 @@ class HTagRestructurer(BaseFixer):
         return str(soup)
 
     def _fix_multiple_h1(self, soup: BeautifulSoup) -> str:
-        """Convert all H1s after the first to H2."""
+        """Keep the most likely visible page heading and demote the rest."""
         h1s = soup.find_all("h1")
         if len(h1s) <= 1:
             return str(soup)
-        for h1 in h1s[1:]:
-            h1.name = "h2"
+
+        preferred = next((
+            h1 for h1 in h1s
+            if h1.find_parent(["main", "article"])
+            or h1.find_parent(class_=re.compile(r"hero|page-header|article-header", re.I))
+        ), None)
+        keeper = preferred or next((h1 for h1 in h1s if not self._is_hidden(h1)), h1s[0])
+
+        for h1 in h1s:
+            if h1 is not keeper:
+                h1.name = "h2"
         return str(soup)
+
+    @staticmethod
+    def _is_hidden(tag) -> bool:
+        current = tag
+        while current is not None:
+            if current.get("aria-hidden", "").lower() == "true":
+                return True
+            style = re.sub(r"\s+", "", current.get("style", "").lower())
+            if any(token in style for token in (
+                "display:none", "visibility:hidden", "opacity:0", "left:-9999",
+            )):
+                return True
+            current = current.parent
+        return False
 
     def _fix_hierarchy_gap(self, soup: BeautifulSoup) -> str:
         """Fix heading level skips by promoting/demoting."""

@@ -68,25 +68,31 @@ class ContentQualityInspector(BaseInspector):
                 raw_metadata={"word_count": word_count},
             ))
 
-        # Check for blog articles with no images
-        image_count = len(soup.find_all("img"))
+        # Count editorial images inside the article, excluding global header/footer media.
+        content = (
+            soup.find("article")
+            or soup.find("main")
+            or soup.find("div", class_=re.compile(r"article|post-content|entry-content", re.I))
+            or soup.body
+            or soup
+        )
+        content_word_count = len(content.get_text(" ", strip=True).split())
+        image_count = len(content.find_all("img"))
         is_blog = "/blog/" in url.lower() or "/insights/" in url.lower()
-        if is_blog and word_count >= 200 and image_count == 0:
+        if is_blog and content_word_count >= 200 and image_count < 3:
             findings.append(RawFinding(
                 url=url, inspector=self.inspector_name,
-                category="article_no_images",
+                category="article_no_images" if image_count == 0 else "article_image_shortage",
                 description=(
-                    f"Blog article has no images ({word_count} words, 0 images). "
-                    f"Articles with relevant images get 94% more views, "
-                    f"higher engagement, and better search rankings."
+                    f"Blog article has {image_count} content images ({content_word_count} words). "
+                    "Add enough relevant images to reach 3-4, subject to editorial review."
                 ),
-                current_value="0 images",
+                current_value=f"{image_count} images",
                 suggested_value=(
-                    "Add 2-3 relevant images (hero image + section illustrations). "
-                    "Use free image APIs (Unsplash, Pexels, Pixabay) to find "
-                    "high-quality photos matching the article topic."
+                    "Search licensed sources first and add 3-4 relevant images "
+                    "with attribution, alt text, captions, and section-aware placement."
                 ),
-                raw_metadata={"word_count": word_count, "image_count": 0},
+                raw_metadata={"word_count": content_word_count, "image_count": image_count},
             ))
 
         # Readability assessment

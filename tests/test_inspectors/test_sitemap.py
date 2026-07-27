@@ -36,9 +36,9 @@ def test_normalize_urls_strips_trailing_slash():
     urls = ["https://example.com/", "https://example.com/about/"]
     result = SitemapInspector._normalize_urls(urls)
     assert "https://example.com" in result
-    assert "https://example.com/" in result
     assert "https://example.com/about" in result
-    assert "https://example.com/about/" in result
+    assert "https://example.com/" not in result
+    assert "https://example.com/about/" not in result
 
 
 def test_inspector_has_correct_name():
