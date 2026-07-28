@@ -29,7 +29,7 @@ class WeeklyReportGenerator:
             .where(
                 Scan.target_id == target_id,
                 Scan.started_at >= week_ago,
-                Scan.status == "completed",
+                Scan.status.in_(("completed", "degraded")),
             )
             .order_by(Scan.started_at)
         )
@@ -43,6 +43,7 @@ class WeeklyReportGenerator:
         result = await self.session.execute(
             select(func.count(Fix.id)).where(
                 Fix.scan_id.in_([s.id for s in scans]),
+                Fix.status == "applied",
             )
         )
         total_fixes = result.scalar() or 0

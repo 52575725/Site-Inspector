@@ -58,6 +58,7 @@ class CompetitorGapInspector(BaseInspector):
         self._competitor_html: dict[str, str] = {}  # raw HTML for AI analysis
         self._page_data: list[dict] = []
         self._fetched = False
+        self._fetch_lock = asyncio.Lock()
         self._deepseek_available: bool | None = None
 
     async def setup(self) -> None:
@@ -84,12 +85,14 @@ class CompetitorGapInspector(BaseInspector):
             return findings
 
         if not self._fetched:
-            # Auto-discover competitors if none configured
-            if not self.competitor_urls:
-                await self._auto_discover()
-            if self.competitor_urls:
-                await self._fetch_all_competitors()
-            self._fetched = True
+            async with self._fetch_lock:
+                if not self._fetched:
+                    # Auto-discover competitors if none configured
+                    if not self.competitor_urls:
+                        await self._auto_discover()
+                    if self.competitor_urls:
+                        await self._fetch_all_competitors()
+                    self._fetched = True
 
         if not self._competitor_profiles:
             return findings

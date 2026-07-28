@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,9 @@ class ResearchFinding:
         """Findings older than 24h are considered stale."""
         try:
             found_dt = datetime.fromisoformat(self.found_at)
-            return datetime.utcnow() - found_dt < timedelta(hours=24)
+            if found_dt.tzinfo is None:
+                found_dt = found_dt.replace(tzinfo=UTC)
+            return datetime.now(UTC) - found_dt < timedelta(hours=24)
         except Exception:
             return False
 
@@ -108,7 +110,7 @@ async def research_topic(
     """
     result = ResearchResult(
         topic=topic,
-        searched_at=datetime.utcnow().isoformat(),
+        searched_at=datetime.now(UTC).isoformat(),
     )
 
     sources = AUTHORITY_SOURCES.get(topic_area, AUTHORITY_SOURCES["silver"])
@@ -180,7 +182,7 @@ async def _search_duckduckgo(
                     snippet=snippet_el.get_text(strip=True)[:500],
                     source_label=source["label"],
                     source_type=source["type"],
-                    found_at=datetime.utcnow().isoformat(),
+                    found_at=datetime.now(UTC).isoformat(),
                     relevance_score=0.7,
                 )
 
@@ -200,11 +202,12 @@ def build_citation_prompt(findings: list[ResearchFinding]) -> str:
         "\n## RESEARCH FINDINGS — YOU MUST CITE THESE\n",
         "The following data was found from authoritative sources. "
         "You MUST incorporate these findings into the article with "
-        "proper inline citations. For each fact/data point, add a "
-        "superscript citation number like this: [1], [2], etc.",
+        "proper inline citations. Link descriptive source text directly to the "
+        "exact source URL using HTML, for example: "
+        "<a href=\"SOURCE_URL\" target=\"_blank\" rel=\"noopener noreferrer\">source title</a>.",
         "",
-        "At the END of the article, add a '## Sources' section listing "
-        "each source with its URL.",
+        "At the END of the article, add a 'Sources' section listing each source "
+        "as a clickable HTML link.",
         "",
     ]
 
@@ -220,7 +223,7 @@ def build_citation_prompt(findings: list[ResearchFinding]) -> str:
     lines.append(
         "\nIMPORTANT: Only cite data that you can verify from the snippets above. "
         "Do NOT invent prices, dates, or statistics. If a source is marked MAY BE STALE, "
-        "note in the text that the data is 'as of [date].'\n"
+        "note in the text that the data is 'as of [date].' Never invent or modify a URL.\n"
     )
 
     return "\n".join(lines)
@@ -250,8 +253,8 @@ def get_static_citations(topic_area: str = "silver") -> str:
         lines.append(f"[{i}] {name}: {url}")
 
     lines.append(
-        "\nCite these sources where relevant. You may also cite other "
-        "reputable sources with proper attribution.\n"
+        "\nWhere relevant, cite these as clickable HTML links using their exact URLs. "
+        "Do not invent additional sources or URLs.\n"
     )
 
     return "\n".join(lines)

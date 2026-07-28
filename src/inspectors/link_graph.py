@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from urllib.parse import urlparse
 
 from src.inspectors.base import BaseInspector, RawFinding
 
@@ -285,7 +286,7 @@ class LinkGraphInspector(BaseInspector):
     def _find_homepage(self, all_urls: set[str]) -> str:
         """Heuristically identify the homepage URL."""
         for u in all_urls:
-            parsed = __import__("urllib.parse").urlparse(u)
+            parsed = urlparse(u)
             path = parsed.path.rstrip("/")
             if path in ("", "/", "/index.html", "/index.htm", "/index.php"):
                 return u

@@ -14,10 +14,11 @@ class SEOInspector(BaseInspector):
 
     inspector_name = "seo"
 
-    def __init__(self):
+    def __init__(self, geo_config: dict | None = None):
         self._all_urls: list[str] = []
         self._incoming_links: dict[str, set[str]] = {}
         self._target_languages: dict[str, str] = {}
+        self._geo_config = geo_config
 
     def set_target_languages(self, languages: dict[str, str]) -> None:
         """Set language→path mapping from target config (e.g. {"en": "/", "ja": "/jp/"})."""
@@ -63,7 +64,8 @@ class SEOInspector(BaseInspector):
         findings.extend(self._check_jsonld(soup, url))
         findings.extend(self._check_image_seo(soup, url))
         findings.extend(self._check_internal_links(soup, url))
-        findings.extend(self._check_geo_tags(soup, url))
+        if self._geo_config:
+            findings.extend(self._check_geo_tags(soup, url))
         findings.extend(self._check_hidden_text(soup, url))
 
         return findings
@@ -390,22 +392,32 @@ class SEOInspector(BaseInspector):
 
         geo_checks = [
             ("geo.region", "missing_geo_region",
-             "<meta name=\"geo.region\" content=\"HK\" />"),
+             self._geo_config.get("region")),
             ("geo.placename", "missing_geo_placename",
-             "<meta name=\"geo.placename\" content=\"Mong Kok, Kowloon, Hong Kong\" />"),
+             self._geo_config.get("placename")),
             ("geo.position", "missing_geo_position",
-             "<meta name=\"geo.position\" content=\"22.3193;114.1694\" />"),
+             self._geo_position()),
         ]
-        for name, category, suggested in geo_checks:
+        for name, category, value in geo_checks:
+            if not value:
+                continue
             existing = head.find("meta", attrs={"name": name})
             if not existing:
                 findings.append(RawFinding(
                     url=url, inspector=self.inspector_name,
                     category=category,
                     description=f"Missing geo meta tag: {name} — helps search engines understand business location",
-                    suggested_value=suggested,
+                    suggested_value=f'<meta name="{name}" content="{value}" />',
+                    confidence=0.6,
                 ))
         return findings
+
+    def _geo_position(self) -> str | None:
+        latitude = self._geo_config.get("latitude") if self._geo_config else None
+        longitude = self._geo_config.get("longitude") if self._geo_config else None
+        if latitude is None or longitude is None:
+            return None
+        return f"{latitude};{longitude}"
 
     def _check_jsonld(self, soup: BeautifulSoup, url: str) -> list[RawFinding]:
         scripts = soup.find_all("script", type="application/ld+json")

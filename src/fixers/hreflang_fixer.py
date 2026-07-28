@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import difflib
+import logging
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
 from src.fixers.base import BaseFixer, FixResult
 from src.sources.base import BaseSource
+
+logger = logging.getLogger(__name__)
 
 
 class HreflangFixer(BaseFixer):

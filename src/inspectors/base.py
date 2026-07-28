@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 
 @dataclass
@@ -18,6 +18,9 @@ class RawFinding:
     current_value: str | None = None
     suggested_value: str | None = None
     raw_metadata: dict = field(default_factory=dict)
+    scope: Literal["site", "template", "page", "element"] = "page"
+    group_key: str | None = None
+    confidence: float = 1.0
 
 
 class BaseInspector(ABC):

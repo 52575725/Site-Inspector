@@ -4,9 +4,8 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-
-from src.web.deps import templates
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +22,8 @@ class WebPRequest(BaseModel):
 
 @router.get("/tools")
 async def tools_page(request: Request):
-    """Render the tools page."""
-    return templates.TemplateResponse(request, "tools.html")
+    """Redirect the retired manual tools page to the dashboard."""
+    return RedirectResponse(url="/", status_code=307)
 
 
 # ── Competitor Tracking ─────────────────────────────────────────

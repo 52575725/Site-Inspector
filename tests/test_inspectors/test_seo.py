@@ -144,3 +144,21 @@ async def test_detects_substantial_hidden_seo_text(seo_inspector):
     <body><h1>Silver guide</h1><div style="display:none"><p>{hidden}</p></div></body></html>"""
     findings = await seo_inspector.inspect("https://example.com/guide/", html)
     assert any(finding.category == "hidden_seo_text" for finding in findings)
+
+
+@pytest.mark.asyncio
+async def test_geo_tags_are_opt_in():
+    html = "<html><head><title>Local business</title></head><body><h1>Home</h1></body></html>"
+
+    default_findings = await SEOInspector().inspect("https://example.com", html)
+    enabled_findings = await SEOInspector(geo_config={
+        "region": "HK",
+        "placename": "Mong Kok",
+        "latitude": 22.3193,
+        "longitude": 114.1694,
+    }).inspect("https://example.com", html)
+
+    assert not any(item.category.startswith("missing_geo_") for item in default_findings)
+    geo_findings = [item for item in enabled_findings if item.category.startswith("missing_geo_")]
+    assert len(geo_findings) == 3
+    assert any('content="HK"' in item.suggested_value for item in geo_findings)

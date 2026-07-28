@@ -202,7 +202,7 @@ class FixOrchestrator:
         # ── Pre-fix snapshot: save original content BEFORE any fixer runs ──
         original_snapshots: dict[str, str] = {}
         for issue in fixable:
-            file_path = await self._url_to_file_path(issue.url, source)
+            file_path = await self._issue_file_path(issue, source)
             if not file_path or file_path in original_snapshots:
                 continue
             try:
@@ -235,7 +235,7 @@ class FixOrchestrator:
                 logger.info(f"Skipping issue #{issue.id} ({issue.url}): {reason}")
                 continue
 
-            file_path = await self._url_to_file_path(issue.url, source)
+            file_path = await self._issue_file_path(issue, source)
             if not file_path:
                 reason = f"no file_path for URL '{issue.url}'"
                 skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
@@ -327,8 +327,6 @@ class FixOrchestrator:
                         )
                         # Restore pre-fixer content and stop processing this page
                         page_content = result.before_content
-                        fix.status = "validation_failed"
-                        fix.applied_at = None
                         await self.issue_repo.update_status(issue.id, "open")
                         break
 
@@ -496,7 +494,7 @@ class FixOrchestrator:
                 skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
                 continue
 
-            file_path = await self._url_to_file_path(issue.url)
+            file_path = await self._issue_file_path(issue)
             if not file_path:
                 reason = f"no file_path for URL '{issue.url}'"
                 skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
@@ -633,6 +631,12 @@ class FixOrchestrator:
         return HttpSource(self.settings)
 
     @staticmethod
+    async def _issue_file_path(issue, source: BaseSource | None = None) -> str | None:
+        if issue.category.startswith("sitemap_"):
+            return "sitemap.xml"
+        return await FixOrchestrator._url_to_file_path(issue.url, source)
+
+    @staticmethod
     async def _url_to_file_path(url: str, source: BaseSource | None = None) -> str | None:
         from pathlib import PurePosixPath
         from urllib.parse import unquote, urlparse
@@ -641,12 +645,14 @@ class FixOrchestrator:
         if "\\" in raw_path or "\x00" in raw_path:
             logger.warning(f"Rejected unsafe URL path: {raw_path!r}")
             return None
+        if not raw_path or raw_path == "/":
+            return "index.html"
         path_obj = PurePosixPath(raw_path)
         if ".." in path_obj.parts:
             logger.warning(f"Rejected URL path traversal: {raw_path!r}")
             return None
         path = str(path_obj).strip("/")
-        if not path:
+        if path in ("", "."):
             return "index.html"
         if "." not in path.split("/")[-1]:
             path = path.rstrip("/") + "/index.html"
@@ -659,11 +665,14 @@ class FixOrchestrator:
         try:
             await source.read_file(path)
             return path
-        except (FileNotFoundError, RuntimeError):
+        except (FileNotFoundError, IsADirectoryError, PermissionError, RuntimeError):
             pass
 
         # Search for matching files: try common web file patterns
-        slug = path.rsplit("/", 1)[-1].replace(".html", "").replace(".htm", "")
+        request_parts = path.split("/")
+        slug = request_parts[-1].replace(".html", "").replace(".htm", "")
+        if slug == "index" and len(request_parts) > 1:
+            slug = request_parts[-2]
         slugs = {slug}
         if "-" in slug:
             slugs.add(slug.replace("-", ""))
@@ -679,13 +688,23 @@ class FixOrchestrator:
         best_score = 0
         for candidate in all_files:
             c = candidate.replace("\\", "/")
+            candidate_parts = c.split("/")
+            request_prefix = request_parts[0] if len(request_parts[0]) == 2 else None
+            candidate_prefix = candidate_parts[0] if len(candidate_parts[0]) == 2 else None
+            if request_prefix != candidate_prefix:
+                continue
             ext = c.rsplit(".", 1)[-1] if "." in c else ""
             base_name = c.rsplit("/", 1)[-1].rsplit(".", 1)[0] if "." in c.rsplit("/", 1)[-1] else c.rsplit("/", 1)[-1]
+            candidate_slug = (
+                candidate_parts[-2]
+                if base_name == "index" and len(candidate_parts) > 1
+                else base_name
+            )
 
             score = 0
-            if base_name in slugs:
+            if candidate_slug in slugs:
                 score = 10
-            elif any(s in base_name for s in slugs):
+            elif any(s and s in candidate_slug for s in slugs):
                 score = 5
             elif slug in c:
                 score = 3
@@ -699,9 +718,9 @@ class FixOrchestrator:
                 best_score = score
                 best = c
 
-        if best and best_score >= 5:
+        if best and best_score >= 12:
             logger.info(f"File path '{path}' not found, mapped to '{best}' (score={best_score})")
             return best
 
         logger.warning(f"Could not find matching file for URL path '{path}' in repo")
-        return path
+        return None

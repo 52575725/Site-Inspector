@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
@@ -16,7 +17,7 @@ router = APIRouter(tags=["fix-actions"])
 
 @router.get("/fixes")
 async def fixes_page(request: Request):
-    return templates.TemplateResponse(request, "fixes_readable.html")
+    return RedirectResponse(url="/", status_code=307)
 
 
 @router.get("/fixes/{fix_id}")

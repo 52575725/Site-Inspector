@@ -91,40 +91,83 @@ class MobileInspector(BaseInspector):
                 raw_metadata={"viewport": vp_name, **vp_size},
             ))
 
-        # Check font size (minimum 16px for body text to prevent iOS zoom)
-        small_fonts = await page.evaluate("""() => {
+        # Flag only strong mobile readability signals. Body text has no universal
+        # 16px WCAG minimum; 16px matters specifically for iOS form-control zoom.
+        small_fonts = []
+        if vp_size["width"] < 1024:
+            small_fonts = await page.evaluate("""() => {
             const small = [];
-            document.querySelectorAll('p, li, span, a, div').forEach(el => {
+            const selectorFor = el => {
+                if (el.id) return `#${el.id}`;
+                const parts = [];
+                while (el && el.nodeType === 1 && parts.length < 6) {
+                    let part = el.tagName.toLowerCase();
+                    const siblings = el.parentElement
+                        ? [...el.parentElement.children].filter(s => s.tagName === el.tagName)
+                        : [];
+                    if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(el) + 1})`;
+                    parts.unshift(part);
+                    el = el.parentElement;
+                }
+                return parts.join(' > ');
+            };
+            document.querySelectorAll('p, li, input, select, textarea').forEach(el => {
                 const style = window.getComputedStyle(el);
                 const fontSize = parseFloat(style.fontSize);
-                if (fontSize > 0 && fontSize < 16 && el.textContent.trim().length > 10) {
-                    small.push({tag: el.tagName, size: fontSize, text: el.textContent.trim().substring(0, 30)});
+                const isControl = ['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName);
+                const hasReadableText = isControl || el.textContent.trim().length > 10;
+                if (hasReadableText && ((isControl && fontSize < 16) || (!isControl && fontSize < 12))) {
+                    small.push({
+                        tag: el.tagName, size: fontSize,
+                        text: el.textContent.trim().substring(0, 30),
+                        selector: selectorFor(el), html: el.outerHTML.substring(0, 300)
+                    });
                 }
             });
             return small.slice(0, 3);
-        }""")
+            }""")
         if small_fonts:
             details = "; ".join(f"{f['tag']} ({f['size']}px): '{f['text']}'" for f in small_fonts)
             findings.append(RawFinding(
                 url=url, inspector=self.inspector_name,
                 category="small_font_size",
-                description=f"Text elements with font-size < 16px at {vp_name}: {details}",
+                description=f"Potentially unreadable mobile text at {vp_name}: {details}",
+                element=small_fonts[0]["selector"],
+                element_html=small_fonts[0]["html"],
                 raw_metadata={"viewport": vp_name, "instances": small_fonts},
+                scope="element",
+                confidence=0.8,
             ))
 
-        # Check touch target sizes (< 48px is too small per WCAG)
+        # WCAG 2.2 AA target-size minimum is 24x24 CSS px, with exceptions.
         if vp_size["width"] < 1024:
             small_targets = await page.evaluate("""() => {
                 const too_small = [];
+                const selectorFor = el => {
+                    if (el.id) return `#${el.id}`;
+                    const parts = [];
+                    while (el && el.nodeType === 1 && parts.length < 6) {
+                        let part = el.tagName.toLowerCase();
+                        const siblings = el.parentElement
+                            ? [...el.parentElement.children].filter(s => s.tagName === el.tagName)
+                            : [];
+                        if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(el) + 1})`;
+                        parts.unshift(part);
+                        el = el.parentElement;
+                    }
+                    return parts.join(' > ');
+                };
                 document.querySelectorAll('a, button, [role="button"], input[type="submit"]').forEach(el => {
                     const rect = el.getBoundingClientRect();
                     if (rect.width > 0 && rect.height > 0 &&
-                        (rect.width < 48 || rect.height < 48)) {
+                        (rect.width < 24 || rect.height < 24)) {
                         too_small.push({
                             tag: el.tagName,
                             w: Math.round(rect.width),
                             h: Math.round(rect.height),
-                            text: (el.textContent || '').trim().substring(0, 20)
+                            text: (el.textContent || '').trim().substring(0, 20),
+                            selector: selectorFor(el),
+                            html: el.outerHTML.substring(0, 300)
                         });
                     }
                 });
@@ -138,8 +181,12 @@ class MobileInspector(BaseInspector):
                 findings.append(RawFinding(
                     url=url, inspector=self.inspector_name,
                     category="small_touch_targets",
-                    description=f"Touch targets smaller than 48px at {vp_name}: {details}",
+                    description=f"Potential touch targets smaller than 24px at {vp_name}: {details}",
+                    element=small_targets[0]["selector"],
+                    element_html=small_targets[0]["html"],
                     raw_metadata={"viewport": vp_name, "instances": small_targets},
+                    scope="element",
+                    confidence=0.7,
                 ))
 
         return findings

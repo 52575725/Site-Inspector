@@ -37,15 +37,24 @@ class ScanRepository:
         await self.session.flush()
         return scan
 
-    async def complete(self, scan_id: int, pages_crawled: int, total_issues: int) -> None:
+    async def complete(
+        self,
+        scan_id: int,
+        pages_crawled: int,
+        total_issues: int,
+        *,
+        status: str = "completed",
+        error_message: str | None = None,
+    ) -> None:
         await self.session.execute(
             update(Scan)
             .where(Scan.id == scan_id)
             .values(
-                status="completed",
+                status=status,
                 completed_at=datetime.utcnow(),
                 pages_crawled=pages_crawled,
                 total_issues_found=total_issues,
+                error_message=error_message,
             )
         )
 

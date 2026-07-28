@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional, Set
+from typing import Optional
 
 from src.inspectors.base import BaseInspector, RawFinding
 
@@ -89,16 +89,10 @@ class HeadersInspector(BaseInspector):
         "info_leak_x_powered_by", "info_leak_x_aspnet_version",
         "info_leak_x_generator", "info_leak_x_drupal_cache",
         "info_leak_x_drupal_dynamic_cache", "missing_compression",
-        "headers_no_response_headers",
     }
 
-    def __init__(self) -> None:
-        self._checked_urls: Set[str] = set()
-        self._reported_server_categories: set[str] = set()
-
     async def setup(self) -> None:
-        self._reported_server_categories.clear()
-        self._checked_urls.clear()
+        pass
 
     async def teardown(self) -> None:
         pass
@@ -127,6 +121,10 @@ class HeadersInspector(BaseInspector):
         findings.extend(self._check_x_robots_tag(url, lower_headers, html_content))
         findings.extend(self._check_content_type_charset(url, lower_headers))
 
+        for finding in findings:
+            if finding.category in self.SERVER_LEVEL_CATEGORIES:
+                finding.scope = "site"
+                finding.group_key = finding.category
         return findings
 
     # ── Security Headers ────────────────────────────────────────────

@@ -60,14 +60,14 @@
 
             <section id="candidate-section" hidden>
                 <div class="section-heading">
-                    <h2>候选图片</h2>
+                    <h2>图库候选</h2>
                     <div class="proposal-actions">
                         <label id="ai-option" class="toggle" hidden>
                             <input id="allow-ai" type="checkbox" checked>
                             搜索不足时使用 AI
                         </label>
                         <button id="proposal-button" class="btn btn-primary" type="button">
-                            生成审核稿
+                            创建审核稿
                         </button>
                     </div>
                 </div>
@@ -237,7 +237,10 @@ document.getElementById('search-button').addEventListener('click', async () => {
             body: JSON.stringify({article_path: state.selected.path, target_count: state.targetCount}),
         }));
         renderSearchResults();
-        setStatus(`找到 ${state.search.candidates.length} 张候选图片`, 'success');
+        const excluded = state.search.history_duplicates_excluded || 0;
+        const duplicateNote = excluded ? `，已排除 ${excluded} 张历史重复图片` : '';
+        const semanticNote = state.search.query_source === 'ai_semantic' ? '（全文语义检索）' : '';
+        setStatus(`找到 ${state.search.candidates.length} 张候选图片${semanticNote}${duplicateNote}`, 'success');
     } catch (error) {
         setStatus(error.message, 'error');
     } finally {
@@ -251,9 +254,15 @@ function renderSearchResults() {
     document.getElementById('candidate-section').hidden = false;
     document.getElementById('query-list').innerHTML = search.queries.map(query => `<span class="query-token">${escapeHtml(query)}</span>`).join('');
     document.getElementById('ai-option').hidden = !search.ai_fallback_available;
+    document.getElementById('proposal-button').disabled = (
+        !search.candidates.length && !search.ai_fallback_available
+    );
     const grid = document.getElementById('candidate-grid');
     if (!search.candidates.length) {
-        grid.innerHTML = '<div class="empty-state">联网图库没有返回可验证授权的候选图片</div>';
+        const message = search.ai_fallback_available
+            ? '没有足够相关且未重复的图库图片，可使用 AI 创建差异化审核图'
+            : '没有足够相关且未重复的图库图片；AI 生图当前未配置，系统不会用泛图凑数';
+        grid.innerHTML = `<div class="empty-state">${message}</div>`;
     } else {
         grid.innerHTML = search.candidates.map((candidate, index) => `
             <label class="candidate-card ${index < search.needed ? 'selected' : ''}">

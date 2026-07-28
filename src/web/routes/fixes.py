@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Query, Request
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select, func
 from sqlalchemy.orm import joinedload
 
 from src.storage.models import Fix, Verification
 from src.presentation.issue_explainer import build_fix_preview
-from src.web.deps import get_db, templates
+from src.web.deps import get_db
 
 router = APIRouter(tags=["fixes"])
 
 
 @router.get("/fixes")
 async def fixes_page(request: Request):
-    return templates.TemplateResponse(request, "fixes.html")
+    return RedirectResponse(url="/", status_code=307)
 
 
 @router.get("/api/fixes")

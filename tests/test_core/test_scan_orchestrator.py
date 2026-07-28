@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.core.scan_orchestrator import ScanOrchestrator
+from src.inspectors.base import RawFinding
 
 
 @pytest.mark.asyncio
@@ -71,3 +72,70 @@ async def test_quick_scan_loads_target_config_inside_run_full_scan(monkeypatch):
 
     assert scan.id == 7
     assert loaded_targets == ["quick-example"]
+
+
+def test_site_findings_are_grouped_with_affected_url_evidence():
+    findings = [
+        RawFinding(
+            url="https://example.com/a",
+            inspector="headers",
+            category="missing_content_security_policy",
+            description="Missing CSP",
+            scope="site",
+            group_key="missing_content_security_policy",
+        ),
+        RawFinding(
+            url="https://example.com/b",
+            inspector="headers",
+            category="missing_content_security_policy",
+            description="Missing CSP",
+            scope="site",
+            group_key="missing_content_security_policy",
+        ),
+        RawFinding(
+            url="https://example.com/a",
+            inspector="seo",
+            category="missing_title",
+            description="Missing title",
+        ),
+    ]
+
+    grouped = ScanOrchestrator._aggregate_findings(findings)
+
+    assert len(grouped) == 2
+    header_finding = next(item for item in grouped if item.inspector == "headers")
+    assert header_finding.raw_metadata["affected_url_count"] == 2
+    assert header_finding.raw_metadata["affected_urls"] == [
+        "https://example.com/a",
+        "https://example.com/b",
+    ]
+    assert "Affects 2 scanned URLs" in header_finding.description
+
+
+def test_inspection_errors_are_grouped_outside_seo_findings():
+    errors = [
+        {"inspector": "competitor_gap", "stage": "inspect", "message": "boom",
+         "url": "https://example.com/a"},
+        {"inspector": "competitor_gap", "stage": "inspect", "message": "boom",
+         "url": "https://example.com/b"},
+    ]
+
+    summary = ScanOrchestrator._summarize_inspection_errors(errors)
+
+    assert summary == [{
+        "inspector": "competitor_gap",
+        "stage": "inspect",
+        "message": "boom",
+        "count": 2,
+        "sample_urls": ["https://example.com/a", "https://example.com/b"],
+    }]
+
+
+def test_non_html_resources_are_excluded_from_page_inspectors():
+    html_page = SimpleNamespace(headers={"Content-Type": "text/html; charset=utf-8"})
+    feed = SimpleNamespace(headers={"content-type": "application/rss+xml"})
+    unknown = SimpleNamespace(headers={})
+
+    assert ScanOrchestrator._is_html_page(html_page)
+    assert not ScanOrchestrator._is_html_page(feed)
+    assert ScanOrchestrator._is_html_page(unknown)
