@@ -91,7 +91,7 @@ class DeferredIssue(BaseModel):
 
 
 class AuditPlan(BaseModel):
-    schema_version: str = "1.2"
+    schema_version: str = "1.3"
     scan_id: int
     target_name: str
     objective: str
@@ -104,6 +104,7 @@ class AuditPlan(BaseModel):
     warnings: list[str]
     min_auto_confidence: float = 0.78
     ai_assisted: bool = False
+    ai_strategy_note: str = ""
 
     def write_json(self, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -403,6 +404,9 @@ class SEOPlanningAgent:
                 "title": action.title,
                 "risk": action.risk,
                 "confidence": action.confidence,
+                "decision": action.decision,
+                "execution_mode": action.execution_mode,
+                "approval_required": action.approval_required,
                 "decision_score": action.decision_score,
                 "decision_factors": action.decision_factors,
                 "urls": action.urls,
@@ -438,7 +442,7 @@ class SEOPlanningAgent:
                     action.strategic_note = note
             portfolio_note = self._clean_note(payload.get("portfolio_note", ""), limit=800)
             if portfolio_note:
-                plan.executive_summary = f"{plan.executive_summary} {portfolio_note}"
+                plan.ai_strategy_note = portfolio_note
             plan.ai_assisted = True
             plan.warnings.append("AI notes are advisory and cannot change execution controls")
         except Exception as exc:
@@ -485,7 +489,21 @@ class SEOPlanningAgent:
         return "medium"
 
     @staticmethod
+    def _is_security_header(category: str) -> bool:
+        return any(token in category for token in (
+            "content_security_policy",
+            "strict_transport_security",
+            "security_header",
+            "x_content_type_options",
+            "x_frame_options",
+            "referrer_policy",
+            "permissions_policy",
+        ))
+
+    @staticmethod
     def _phase(category: str) -> int:
+        if SEOPlanningAgent._is_security_header(category):
+            return 4
         if any(token in category for token in (
             "robots", "sitemap", "http_", "x_robots", "content_type", "canonical",
         )):
@@ -695,7 +713,12 @@ class SEOPlanningAgent:
 
     @staticmethod
     def _proposed_solution(category: str, fixer: str | None) -> str:
-        if "robots" in category or "sitemap" in category:
+        if SEOPlanningAgent._is_security_header(category):
+            solution = (
+                "Configure the missing response security header at the web server or CDN, "
+                "starting with report-only or a canary page where applicable"
+            )
+        elif "robots" in category or "sitemap" in category:
             solution = "Correct crawl directives and regenerate a resolvable, canonical sitemap"
         elif "canonical" in category or "hreflang" in category:
             solution = "Align canonical and language annotations with the final indexable URL set"
@@ -731,12 +754,19 @@ class SEOPlanningAgent:
             "Run category-specific validation and rendering checks",
             "Measure the expected search or engagement metric after release",
         ])
-        if any(token in category for token in ("content", "eeat", "freshness")):
+        if SEOPlanningAgent._is_security_header(category):
+            steps.insert(
+                2,
+                "Inventory scripts, forms, embeds, and third-party origins before enforcing the header",
+            )
+        elif any(token in category for token in ("content", "eeat", "freshness")):
             steps.insert(2, "Verify every business claim against an approved source")
         return steps
 
     @staticmethod
     def _expected_metrics(category: str) -> list[str]:
+        if SEOPlanningAgent._is_security_header(category):
+            return ["valid security headers", "policy violations", "affected page count"]
         if any(token in category for token in ("robots", "sitemap", "canonical", "crawl", "url_")):
             return ["valid indexed pages", "crawl errors", "index coverage"]
         if any(token in category for token in ("title", "meta_description", "schema")):
@@ -750,19 +780,36 @@ class SEOPlanningAgent:
     @staticmethod
     def _validation_checks(category: str) -> list[str]:
         checks = ["source snapshot exists", "syntax and content-retention validation"]
+        if SEOPlanningAgent._is_security_header(category):
+            checks.extend([
+                "response header is present on representative pages",
+                "critical scripts, forms, images, and embeds still work",
+                "browser console has no new policy violations",
+            ])
         if "schema" in category or "structured" in category:
             checks.extend(["all JSON-LD parses", "no duplicate or fabricated schema fields"])
         if any(token in category for token in ("robots", "sitemap", "canonical", "hreflang")):
             checks.extend(["crawl directives remain valid", "canonical and language URLs resolve"])
         if any(token in category for token in ("image", "mobile", "lcp", "cls", "performance")):
             checks.extend(["desktop and mobile render comparison", "asset URLs resolve"])
-        if any(token in category for token in ("content", "title", "meta_description", "eeat")):
+        if (
+            not SEOPlanningAgent._is_security_header(category)
+            and any(token in category for token in ("content", "title", "meta_description", "eeat"))
+        ):
             checks.extend(["business facts remain unchanged", "copy is not truncated"])
         return list(dict.fromkeys(checks))
 
     @staticmethod
     def _rollback_condition(category: str) -> str:
-        if any(token in category for token in ("content", "title", "meta_description", "eeat")):
+        if SEOPlanningAgent._is_security_header(category):
+            return (
+                "Rollback if the policy blocks critical scripts, forms, images, "
+                "or third-party integrations"
+            )
+        if (
+            not SEOPlanningAgent._is_security_header(category)
+            and any(token in category for token in ("content", "title", "meta_description", "eeat"))
+        ):
             return "Rollback if facts change, text is truncated, or the target metric degrades"
         return "Rollback if validation fails, rendering regresses, or the target metric degrades"
 

@@ -29,6 +29,20 @@ RANKING_OPPORTUNITY: dict[str, float] = {
 class Analyzer:
     """Three-dimensional priority scoring and issue classification."""
 
+    P0_CATEGORIES = {
+        "empty_page",
+        "headers_no_response_headers",
+        "http_500",
+        "js_csr_empty_mount",
+        "missing_content_type",
+        "missing_h1",
+        "missing_title",
+        "platform_missing_head",
+        "robots_txt_disallow_all",
+        "sitemap_missing",
+        "x_robots_tag_blocks_indexing",
+    }
+
     SEVERITY_MAP = {
         # SEO
         "missing_title": 0.95,
@@ -331,7 +345,10 @@ class Analyzer:
             if position is not None:
                 gsc_hits += 1
             issue.priority_score = min(1.0, round(base_score * opportunity, 3))
-            issue.priority_tier = self._classify_tier(round(issue.priority_score, 3))
+            issue.priority_tier = self._classify_tier(
+                round(issue.priority_score, 3),
+                issue.category,
+            )
 
         await self.session.flush()
         logger.info(
@@ -584,8 +601,8 @@ class Analyzer:
         return RANKING_OPPORTUNITY["deep"]
 
     @staticmethod
-    def _classify_tier(score: float) -> str:
-        if score >= 0.70:
+    def _classify_tier(score: float, category: str) -> str:
+        if score >= 0.70 and category in Analyzer.P0_CATEGORIES:
             return "P0"
         if score >= 0.45:
             return "P1"

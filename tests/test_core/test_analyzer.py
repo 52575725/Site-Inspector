@@ -36,7 +36,13 @@ async def test_p0_classification(test_session: AsyncSession, analyzer_settings):
 
     # Should be P0 (missing_title is 0.95 severity, fully auto ROI 0.9, landing page 0.7)
     assert score >= 0.70
-    assert analyzer._classify_tier(score) == "P0"
+    assert analyzer._classify_tier(score, issue.category) == "P0"
+
+
+def test_high_score_non_blocker_is_not_p0(analyzer_settings, test_session):
+    analyzer = Analyzer(analyzer_settings, test_session)
+
+    assert analyzer._classify_tier(0.90, "missing_content_security_policy") == "P1"
 
 
 @pytest.mark.asyncio

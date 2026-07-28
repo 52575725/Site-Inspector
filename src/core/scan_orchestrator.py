@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -28,6 +29,7 @@ from src.inspectors.content_gap import ContentGapDetector
 from src.inspectors.content_quality import ContentQualityInspector
 from src.inspectors.crawl_budget import CrawlBudgetInspector
 from src.inspectors.eeat import EEATInspector
+from src.inspectors.external_references import ExternalReferencesInspector
 from src.inspectors.headers import HeadersInspector
 from src.inspectors.image_seo import ImageSEOInspector
 from src.inspectors.js_seo import JSSeoInspector
@@ -153,26 +155,40 @@ class ScanOrchestrator:
 
         # 5. Run all inspectors
         all_findings: list[RawFinding] = []
+        inspectable_pages = [cp for cp in crawled_pages if self._is_html_page(cp)]
+        skipped_non_html = len(crawled_pages) - len(inspectable_pages)
+        if skipped_non_html:
+            logger.info("Skipped %s non-HTML resources during page inspection", skipped_non_html)
 
         # Prepare shared state for content quality inspector
         all_texts = [
-            cp.html_content for cp in crawled_pages if cp.html_content
+            cp.html_content for cp in inspectable_pages if cp.html_content
         ]
 
         # Initialize inspectors
         inspectors = self._create_inspectors()
+        inspection_errors: list[dict[str, str]] = []
+        active_inspectors = []
         for insp in inspectors:
             try:
                 await insp.setup()
+                active_inspectors.append(insp)
             except Exception as e:
-                logger.warning(f"Failed to setup {insp.inspector_name}: {e}")
+                message = str(e)[:500]
+                inspection_errors.append({
+                    "inspector": insp.inspector_name,
+                    "stage": "setup",
+                    "message": message,
+                })
+                logger.warning(f"Failed to setup {insp.inspector_name}: {message}")
+        inspectors = active_inspectors
 
         await self.scan_repo.set_phase(scan.id, "inspecting")
         await self.session.commit()
 
         # Set content texts for dedup
-        crawled_urls = [cp.url for cp in crawled_pages]
-        page_htmls = {cp.url: cp.html_content for cp in crawled_pages}
+        crawled_urls = [cp.url for cp in inspectable_pages]
+        page_htmls = {cp.url: cp.html_content for cp in inspectable_pages}
         sitemap_url = target_config.get(
             "sitemap_url",
             f"{_base_url}/sitemap.xml",
@@ -195,7 +211,7 @@ class ScanOrchestrator:
             if isinstance(insp, CannibalizationDetector):
                 insp.set_page_data([
                     {"url": cp.url, "title": cp.title, "html_content": cp.html_content}
-                    for cp in crawled_pages
+                    for cp in inspectable_pages
                 ])
             if isinstance(insp, EEATInspector):
                 insp.set_crawled_urls(crawled_urls)
@@ -205,11 +221,11 @@ class ScanOrchestrator:
                 insp.set_crawled_urls(crawled_urls)
                 insp.set_page_data([
                     {"url": cp.url, "title": cp.title, "html_content": cp.html_content}
-                    for cp in crawled_pages
+                    for cp in inspectable_pages
                 ])
                 # Build incoming links map from page HTMLs for orphan detection
                 incoming: dict[str, set[str]] = {}
-                for cp in crawled_pages:
+                for cp in inspectable_pages:
                     from urllib.parse import urljoin
                     from bs4 import BeautifulSoup
                     soup = BeautifulSoup(cp.html_content or "", "html.parser")
@@ -222,11 +238,10 @@ class ScanOrchestrator:
             if isinstance(insp, CompetitorGapInspector):
                 insp.set_page_data([
                     {"url": cp.url, "title": cp.title, "h1": ""}
-                    for cp in crawled_pages
+                    for cp in inspectable_pages
                 ])
 
         # Run inspectors concurrently per page
-        http_client = httpx.AsyncClient(timeout=15)
         semaphore = asyncio.Semaphore(self.settings.crawl_max_concurrent)
 
         async def inspect_page(cp) -> list[RawFinding]:
@@ -239,15 +254,17 @@ class ScanOrchestrator:
                         )
                         findings.extend(page_findings)
                     except Exception as e:
-                        logger.error(f"{insp.inspector_name} failed on {cp.url}: {e}")
-                        findings.append(RawFinding(
-                            url=cp.url, inspector=insp.inspector_name,
-                            category="inspector_error",
-                            description=f"Inspector crashed: {str(e)[:200]}",
-                        ))
+                        message = str(e)[:500]
+                        logger.error(f"{insp.inspector_name} failed on {cp.url}: {message}")
+                        inspection_errors.append({
+                            "inspector": insp.inspector_name,
+                            "stage": "inspect",
+                            "url": cp.url,
+                            "message": message,
+                        })
             return findings
 
-        tasks = [inspect_page(cp) for cp in crawled_pages]
+        tasks = [inspect_page(cp) for cp in inspectable_pages]
         results = await asyncio.gather(*tasks)
         for r in results:
             all_findings.extend(r)
@@ -257,6 +274,11 @@ class ScanOrchestrator:
             try:
                 await insp.teardown()
             except Exception as e:
+                inspection_errors.append({
+                    "inspector": insp.inspector_name,
+                    "stage": "teardown",
+                    "message": str(e)[:500],
+                })
                 logger.warning(f"Failed to teardown {insp.inspector_name}: {e}", exc_info=True)
 
             # Collect cross-page findings from cluster inspector
@@ -269,6 +291,11 @@ class ScanOrchestrator:
                         f"cross-page findings"
                     )
                 except Exception as e:
+                    inspection_errors.append({
+                        "inspector": insp.inspector_name,
+                        "stage": "collect",
+                        "message": str(e)[:500],
+                    })
                     logger.warning(f"Failed to collect cluster findings: {e}")
 
             # Collect cross-page findings from link graph inspector
@@ -281,9 +308,15 @@ class ScanOrchestrator:
                         f"cross-page findings"
                     )
                 except Exception as e:
+                    inspection_errors.append({
+                        "inspector": insp.inspector_name,
+                        "stage": "collect",
+                        "message": str(e)[:500],
+                    })
                     logger.warning(f"Failed to collect link graph findings: {e}")
 
-        await http_client.aclose()
+        raw_finding_count = len(all_findings)
+        all_findings = self._aggregate_findings(all_findings)
 
         # 6. Save artifacts (Lighthouse JSON, screenshots)
         lighthouse_dir = self.settings.data_dir / "scans" / str(scan.id)
@@ -322,9 +355,18 @@ class ScanOrchestrator:
 
             # Build enriched description with metadata
             full_description = finding.description
-            if finding.raw_metadata:
+            metadata = dict(finding.raw_metadata)
+            metadata.update({
+                "scope": finding.scope,
+                "confidence": finding.confidence,
+            })
+            if finding.group_key:
+                metadata["group_key"] = finding.group_key
+            if finding.element_html:
+                metadata["element_html"] = finding.element_html
+            if metadata:
                 import json as json_mod
-                full_description += f"\n[metadata: {json_mod.dumps(finding.raw_metadata)}]"
+                full_description += f"\n[metadata: {json_mod.dumps(metadata)}]"
 
             page_scan_id = page_ids.get(self._normalize_url(finding.url), fallback_page_id)
             issue = Issue(
@@ -345,21 +387,31 @@ class ScanOrchestrator:
             new_issues += 1
 
         logger.info(f"Scan found {new_issues} new issues "
-                    f"(total raw findings: {len(all_findings)})")
+                    f"(total raw findings: {raw_finding_count})")
+
+        scan_status = "degraded" if inspection_errors else "completed"
+        health_summary = self._summarize_inspection_errors(inspection_errors)
+        error_message = json.dumps(health_summary) if health_summary else None
 
         # 8. Complete scan (only for standalone daily scans; quick-scan caller handles its own completion)
         if existing_scan_id is None:
             await self.scan_repo.complete(
                 scan.id, len(crawled_pages), new_issues,
+                status=scan_status, error_message=error_message,
             )
-        else:
-            # Update ORM object so caller sees real counts
-            scan.pages_crawled = len(crawled_pages)
-            scan.total_issues_found = new_issues
+        # Keep the returned ORM object current for both standalone and quick scans.
+        scan.pages_crawled = len(crawled_pages)
+        scan.total_issues_found = new_issues
+        scan.status = scan_status
+        scan.error_message = error_message
         await self.audit_repo.log(
             "scan_completed", "scan", scan.id,
             {"pages": len(crawled_pages), "new_issues": new_issues,
-             "total_findings": len(all_findings)},
+             "total_findings": len(all_findings),
+             "raw_findings": raw_finding_count,
+             "skipped_non_html": skipped_non_html,
+             "status": scan_status,
+             "inspection_errors": health_summary},
         )
 
         await self.session.commit()
@@ -378,13 +430,80 @@ class ScanOrchestrator:
             path = path.rstrip("/")
         return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
 
+    @staticmethod
+    def _is_html_page(page) -> bool:
+        headers = {str(key).lower(): str(value) for key, value in (page.headers or {}).items()}
+        content_type = headers.get("content-type", "").lower()
+        return not content_type or "html" in content_type
+
+    @staticmethod
+    def _aggregate_findings(findings: list[RawFinding]) -> list[RawFinding]:
+        """Collapse site-scoped observations while retaining affected-page evidence."""
+        output: list[RawFinding] = []
+        grouped: dict[tuple[str, str, str], RawFinding] = {}
+        affected_urls: dict[tuple[str, str, str], set[str]] = {}
+        current_values: dict[tuple[str, str, str], set[str]] = {}
+
+        for finding in findings:
+            if finding.scope != "site":
+                output.append(finding)
+                continue
+
+            key = (
+                finding.inspector,
+                finding.category,
+                finding.group_key or finding.category,
+            )
+            affected_urls.setdefault(key, set()).add(finding.url)
+            if finding.current_value:
+                current_values.setdefault(key, set()).add(finding.current_value)
+            if key not in grouped:
+                grouped[key] = replace(finding, raw_metadata=dict(finding.raw_metadata))
+
+        for key, finding in grouped.items():
+            urls = sorted(affected_urls[key])
+            metadata = dict(finding.raw_metadata)
+            metadata.update({
+                "affected_url_count": len(urls),
+                "affected_urls": urls,
+            })
+            values = sorted(current_values.get(key, set()))
+            if values:
+                metadata["observed_values"] = values
+            finding.raw_metadata = metadata
+            if len(urls) > 1:
+                finding.description = f"{finding.description} Affects {len(urls)} scanned URLs."
+            output.append(finding)
+
+        return output
+
+    @staticmethod
+    def _summarize_inspection_errors(errors: list[dict[str, str]]) -> list[dict]:
+        grouped: dict[tuple[str, str, str], dict] = {}
+        for error in errors:
+            key = (error["inspector"], error["stage"], error["message"])
+            summary = grouped.setdefault(key, {
+                "inspector": error["inspector"],
+                "stage": error["stage"],
+                "message": error["message"],
+                "count": 0,
+                "sample_urls": [],
+            })
+            summary["count"] += 1
+            if error.get("url") and len(summary["sample_urls"]) < 3:
+                summary["sample_urls"].append(error["url"])
+        return list(grouped.values())
+
     def _create_inspectors(self) -> list:
         http_client = httpx.AsyncClient(timeout=15, follow_redirects=False)
         target_config = self.settings.__class__.load_target(self.settings.target_name)
         competitor_urls = target_config.get("competitors", [])
         business_config = target_config.get("business", {})
         return [
-            SEOInspector(),
+            SEOInspector(
+                geo_config=(target_config.get("geo")
+                            if target_config.get("geo", {}).get("enabled") else None),
+            ),
             BrokenLinksInspector(client=http_client),
             CompetitorGapInspector(
                 competitor_urls=competitor_urls,
@@ -396,6 +515,7 @@ class ScanOrchestrator:
             JSSeoInspector(),
             CrawlBudgetInspector(),
             EEATInspector(),
+            ExternalReferencesInspector(target_config=target_config),
             AccessibilityInspector(),
             PerformanceInspector(
                 lighthouse_path=self.settings.lighthouse_path,

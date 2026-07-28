@@ -4,11 +4,11 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.web.deps import get_db, templates
 from src.sources.base import resolve_within
@@ -20,6 +20,8 @@ router = APIRouter(tags=["articles"])
 
 GENERATED_DIR = Path("data/generated")
 GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+RESEARCH_DIR = GENERATED_DIR / "research-plans"
+RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
 ARTICLE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 
 
@@ -28,7 +30,27 @@ class GenerateRequest(BaseModel):
     keywords: str = ""
     language: str = "en"
     word_count: int = 800
-    page_type: str = "blog"  # blog, market_analysis, product_review, guide, news, landing
+    page_type: str = "auto"  # AI selects unless a supported type is requested
+    with_research: bool = True  # search authoritative sources for citations
+    topic_area: str = "silver"  # silver, trade, logistics, finance
+
+
+class AutoGenerateRequest(BaseModel):
+    website_url: str = Field(min_length=4, max_length=2048)
+    topic: str = Field(default="", max_length=300)
+    keywords: str = Field(default="", max_length=1000)
+    language: str = "en"
+    word_count: int = Field(default=1200, ge=300, le=3000)
+    page_type: str = "auto"
+    max_reference_articles: int = Field(default=5, ge=1, le=8)
+
+
+class GenerateFromResearchRequest(BaseModel):
+    research_id: str = Field(min_length=32, max_length=32)
+    headline: str = Field(default="", max_length=300)
+    word_count: int | None = Field(default=None, ge=300, le=5000)
+    page_type: str = Field(default="", max_length=40)
+    outline: list[str] = Field(default_factory=list, max_length=12)
 
 
 class TranslateRequest(BaseModel):
@@ -43,7 +65,7 @@ class BatchGenerateRequest(BaseModel):
     keywords: str = ""
     language: str = "en"
     word_count: int = 800
-    page_type: str = "blog"
+    page_type: str = "auto"
 
 
 class PushRequest(BaseModel):
@@ -63,12 +85,19 @@ async def batch_generate_articles(request: Request, body: BatchGenerateRequest):
     results = []
     for topic in body.topics:
         try:
+            page_type = await _resolve_article_type(
+                settings,
+                topic=topic.strip(),
+                keywords=body.keywords,
+                language=body.language,
+                requested=body.page_type,
+            )
             prompt = _build_article_prompt(
                 topic=topic.strip(),
                 keywords=body.keywords,
                 language=body.language,
                 word_count=body.word_count,
-                page_type=body.page_type,
+                page_type=page_type,
             )
             import httpx
             async with httpx.AsyncClient(timeout=180) as client:
@@ -87,12 +116,12 @@ async def batch_generate_articles(request: Request, body: BatchGenerateRequest):
                 resp.raise_for_status()
                 raw = resp.json()["choices"][0]["message"]["content"]
 
-            html_content = _extract_html(raw)
+            html_content = _sanitize_generated_html(_extract_html(raw))
             title = _extract_title(html_content) or topic.strip()
             article_id = __import__("uuid").uuid4().hex[:12]
             article_data = {
                 "id": article_id, "topic": topic.strip(), "keywords": body.keywords,
-                "language": body.language, "page_type": body.page_type,
+                "language": body.language, "page_type": page_type,
                 "title": title, "html": html_content,
                 "created_at": __import__("datetime").datetime.utcnow().isoformat(),
                 "pushed": False,
@@ -100,7 +129,10 @@ async def batch_generate_articles(request: Request, body: BatchGenerateRequest):
             (GENERATED_DIR / f"{article_id}.json").write_text(
                 __import__("json").dumps(article_data, ensure_ascii=False, indent=2), encoding="utf-8")
             (GENERATED_DIR / f"{article_id}.html").write_text(html_content, encoding="utf-8")
-            results.append({"topic": topic.strip(), "id": article_id, "title": title, "status": "ok"})
+            results.append({
+                "topic": topic.strip(), "id": article_id, "title": title,
+                "page_type": page_type, "status": "ok",
+            })
         except Exception as e:
             logger.error(f"Batch generate failed for '{topic}': {e}")
             results.append({"topic": topic.strip(), "status": "failed", "error": str(e)[:200]})
@@ -479,6 +511,292 @@ async def articles_page(request: Request):
     return templates.TemplateResponse(request, "articles.html")
 
 
+def _research_plan_path(research_id: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{32}", research_id):
+        raise HTTPException(status_code=400, detail="Invalid research identifier")
+    path = (RESEARCH_DIR / f"{research_id}.json").resolve()
+    if path.parent != RESEARCH_DIR.resolve():
+        raise HTTPException(status_code=400, detail="Invalid research identifier")
+    return path
+
+
+@router.post("/api/articles/research")
+async def research_article_plan(request: Request, body: AutoGenerateRequest):
+    """Research a site, real-language queries, and competitors without writing an article."""
+    settings = request.app.state.settings
+    if not settings.deepseek_api_key:
+        raise HTTPException(status_code=400, detail="DeepSeek API key not configured")
+
+    from src.ai.automatic_article import AutomaticArticleWorkflow
+
+    workflow = AutomaticArticleWorkflow(settings)
+    try:
+        research = await workflow.run(
+            body.website_url,
+            language=body.language,
+            topic_hint=body.topic,
+            keyword_hint=body.keywords,
+            requested_page_type=body.page_type,
+            max_reference_articles=body.max_reference_articles,
+        )
+        generation_context = workflow.build_generation_context(research)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Article research failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail="Website and competitor research failed. Check that the URL is public and try again.",
+        ) from exc
+    finally:
+        await workflow.close()
+
+    research_id = uuid.uuid4().hex
+    report = research.to_dict()
+    plan_data = {
+        "id": research_id,
+        "status": "awaiting_confirmation",
+        "request": body.model_dump(),
+        "research_report": report,
+        "generation_context": generation_context,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
+    _research_plan_path(research_id).write_text(
+        json.dumps(plan_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return {
+        "research_id": research_id,
+        "status": plan_data["status"],
+        "research_report": report,
+        "writing_brief": report.get("writing_brief", {}),
+    }
+
+
+@router.post("/api/articles/generate-from-research")
+async def generate_article_from_research(
+    request: Request,
+    body: GenerateFromResearchRequest,
+):
+    """Generate only after a saved research brief has been reviewed and confirmed."""
+    settings = request.app.state.settings
+    if not settings.deepseek_api_key:
+        raise HTTPException(status_code=400, detail="DeepSeek API key not configured")
+
+    plan_path = _research_plan_path(body.research_id)
+    if not plan_path.is_file():
+        raise HTTPException(status_code=404, detail="Research plan not found")
+    try:
+        plan_data = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail="Research plan is invalid") from exc
+
+    report = plan_data.get("research_report", {})
+    brief = dict(report.get("writing_brief", {}))
+    request_data = plan_data.get("request", {})
+    allowed_types = {"blog", "market_analysis", "product_review", "guide", "news", "landing"}
+    page_type = body.page_type if body.page_type in allowed_types else brief.get("page_type", "blog")
+    headline = body.headline.strip() or next(
+        iter(brief.get("headline_options", [])),
+        brief.get("topic", "Article"),
+    )
+    word_count = body.word_count or brief.get("recommended_word_count") or request_data.get("word_count", 1200)
+    outline = [" ".join(item.split())[:200] for item in body.outline if item.strip()][:12]
+    if not outline:
+        outline = brief.get("recommended_outline", [])[:12]
+    confirmed_brief = {
+        **brief,
+        "confirmed_headline": headline,
+        "confirmed_word_count": word_count,
+        "confirmed_page_type": page_type,
+        "confirmed_outline": outline,
+    }
+    prompt = _build_article_prompt(
+        topic=headline,
+        keywords=", ".join(brief.get("target_keywords", [])),
+        language=request_data.get("language", "en"),
+        word_count=word_count,
+        page_type=page_type,
+        site_research=(
+            plan_data.get("generation_context", "")
+            + "\n\n## USER-CONFIRMED BRIEF\n"
+            + json.dumps(confirmed_brief, ensure_ascii=False, indent=2)
+        ),
+    )
+
+    from src.ai.deepseek_client import DeepSeekClient
+
+    ai = DeepSeekClient(
+        api_key=settings.deepseek_api_key,
+        model=settings.deepseek_model,
+        timeout=max(settings.deepseek_timeout, 180),
+    )
+    try:
+        raw = await ai.generate_text(
+            prompt,
+            system=(
+                "You are an expert SEO content writer. Follow the user-confirmed brief, "
+                "answer validated user queries, cite only verified authority URLs, and never "
+                "copy reference wording. Output valid HTML only."
+            ),
+            temperature=0.55,
+            max_tokens=7000,
+        )
+    except Exception as exc:
+        logger.error("Confirmed article generation failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=502, detail="Research is saved, but article generation failed.") from exc
+    finally:
+        await ai.close()
+
+    html_content = _sanitize_generated_html(_extract_html(raw))
+    title = _extract_title(html_content) or headline
+    article_id = uuid.uuid4().hex[:12]
+    created_at = datetime.now(UTC).isoformat()
+    article_data = {
+        "id": article_id,
+        "research_id": body.research_id,
+        "website_url": report.get("profile", {}).get("website_url", ""),
+        "topic": brief.get("topic", headline),
+        "keywords": ", ".join(brief.get("target_keywords", [])),
+        "language": request_data.get("language", "en"),
+        "page_type": page_type,
+        "title": title,
+        "html": html_content,
+        "confirmed_brief": confirmed_brief,
+        "research_report": report,
+        "created_at": created_at,
+        "pushed": False,
+    }
+    (GENERATED_DIR / f"{article_id}.json").write_text(
+        json.dumps(article_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (GENERATED_DIR / f"{article_id}.html").write_text(html_content, encoding="utf-8")
+    plan_data["status"] = "generated"
+    plan_data["generated_article_id"] = article_id
+    plan_data["confirmed_brief"] = confirmed_brief
+    plan_path.write_text(json.dumps(plan_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "id": article_id,
+        "research_id": body.research_id,
+        "title": title,
+        "html": html_content,
+        "created_at": created_at,
+        "topic": article_data["topic"],
+        "page_type": page_type,
+        "confirmed_brief": confirmed_brief,
+        "research_report": report,
+    }
+
+
+@router.post("/api/articles/auto-generate")
+async def auto_generate_article(request: Request, body: AutoGenerateRequest):
+    """Detect a site's business, research search-result structures, and write a draft."""
+    settings = request.app.state.settings
+    if not settings.deepseek_api_key:
+        raise HTTPException(status_code=400, detail="DeepSeek API key not configured")
+
+    from src.ai.automatic_article import AutomaticArticleWorkflow
+    from src.ai.deepseek_client import DeepSeekClient
+
+    workflow = AutomaticArticleWorkflow(settings)
+    try:
+        research = await workflow.run(
+            body.website_url,
+            language=body.language,
+            topic_hint=body.topic,
+            keyword_hint=body.keywords,
+            requested_page_type=body.page_type,
+            max_reference_articles=body.max_reference_articles,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Automatic article research failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail="网站研究失败，请检查网址是否公开可访问后重试。",
+        ) from exc
+    finally:
+        await workflow.close()
+
+    profile = research.profile
+    topic = research.editorial_decision.topic or body.topic.strip() or profile.recommended_topic
+    page_type = research.editorial_decision.page_type
+    keywords = profile.keywords
+    prompt = _build_article_prompt(
+        topic=topic,
+        keywords=", ".join(keywords),
+        language=body.language,
+        word_count=body.word_count,
+        page_type=page_type,
+        site_research=AutomaticArticleWorkflow.build_generation_context(research),
+    )
+
+    ai = DeepSeekClient(
+        api_key=settings.deepseek_api_key,
+        model=settings.deepseek_model,
+        timeout=max(settings.deepseek_timeout, 180),
+    )
+    try:
+        raw = await ai.generate_text(
+            prompt,
+            system=(
+                "You are an expert SEO content writer. Produce original, useful HTML grounded "
+                "in the supplied site evidence. Never copy reference-article wording."
+            ),
+            temperature=0.6,
+            max_tokens=6000,
+        )
+    except Exception as exc:
+        logger.error("Automatic article generation failed: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail="研究已完成，但 AI 文章生成失败，请稍后重试。",
+        ) from exc
+    finally:
+        await ai.close()
+
+    html_content = _sanitize_generated_html(_extract_html(raw))
+    title = _extract_title(html_content) or topic
+    article_id = uuid.uuid4().hex[:12]
+    created_at = datetime.now(UTC).isoformat()
+    research_report = research.to_dict()
+    article_data = {
+        "id": article_id,
+        "website_url": profile.website_url,
+        "topic": topic,
+        "keywords": ", ".join(keywords),
+        "language": body.language,
+        "page_type": page_type,
+        "requested_page_type": body.page_type,
+        "title": title,
+        "html": html_content,
+        "research_report": research_report,
+        "created_at": created_at,
+        "pushed": False,
+    }
+    (GENERATED_DIR / f"{article_id}.json").write_text(
+        json.dumps(article_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (GENERATED_DIR / f"{article_id}.html").write_text(html_content, encoding="utf-8")
+    return {
+        "id": article_id,
+        "title": title,
+        "html": html_content,
+        "created_at": created_at,
+        "topic": topic,
+        "page_type": page_type,
+        "research_report": research_report,
+    }
+
+
 @router.post("/api/articles/generate")
 async def generate_article(request: Request, body: GenerateRequest):
     """Generate an SEO-optimized article using AI."""
@@ -488,12 +806,55 @@ async def generate_article(request: Request, body: GenerateRequest):
     if not api_key:
         raise HTTPException(status_code=400, detail="DeepSeek API key not configured")
 
+    # ── Research phase: search authoritative sources for citations ──
+    research_findings = ""
+    citations_used = []
+    if body.with_research:
+        from src.ai.article_researcher import (
+            ResearchResult,
+            research_topic,
+            build_citation_prompt,
+            get_static_citations,
+        )
+        kw_list = [k.strip() for k in body.keywords.split(",") if k.strip()]
+        try:
+            research = await research_topic(
+                topic=body.topic,
+                keywords=kw_list,
+                topic_area=body.topic_area,
+                max_sources=5,
+            )
+            if research.findings:
+                research_findings = build_citation_prompt(research.findings)
+                citations_used = [
+                    {"label": f.source_label, "url": f.url, "type": f.source_type}
+                    for f in research.findings
+                ]
+                logger.info(
+                    f"Research: found {len(research.findings)} sources for '{body.topic}'"
+                )
+            else:
+                # Fallback to static authoritative citations
+                research_findings = get_static_citations(body.topic_area)
+                logger.info(f"Research: no live results, using static citations for '{body.topic}'")
+        except Exception as e:
+            logger.warning(f"Research failed for '{body.topic}': {e}")
+            research_findings = get_static_citations(body.topic_area)
+
+    page_type = await _resolve_article_type(
+        settings,
+        topic=body.topic,
+        keywords=body.keywords,
+        language=body.language,
+        requested=body.page_type,
+    )
     prompt = _build_article_prompt(
         topic=body.topic,
         keywords=body.keywords,
         language=body.language,
         word_count=body.word_count,
-        page_type=body.page_type,
+        page_type=page_type,
+        research_findings=research_findings,
     )
 
     try:
@@ -523,7 +884,7 @@ async def generate_article(request: Request, body: GenerateRequest):
         raise HTTPException(status_code=500, detail="AI 生成失败，请稍后重试。如持续失败请检查 API Key 配置。")
 
     # Extract HTML from the response
-    html_content = _extract_html(raw)
+    html_content = _sanitize_generated_html(_extract_html(raw))
     title = _extract_title(html_content) or body.topic
 
     # Store
@@ -533,9 +894,12 @@ async def generate_article(request: Request, body: GenerateRequest):
         "topic": body.topic,
         "keywords": body.keywords,
         "language": body.language,
-        "page_type": body.page_type,
+        "page_type": page_type,
+        "requested_page_type": body.page_type,
         "title": title,
         "html": html_content,
+        "citations": citations_used,
+        "with_research": body.with_research,
         "created_at": datetime.utcnow().isoformat(),
         "pushed": False,
     }
@@ -563,6 +927,9 @@ async def get_article(request: Request, article_id: str):
         raise HTTPException(status_code=404, detail="Article not found")
 
     data = json.loads(file_path.read_text(encoding="utf-8-sig"))
+    if data.get("images"):
+        from src.web.routes.article_images import _display_generated_html
+        data["html"] = _display_generated_html(article_id, data["html"])
     return data
 
 
@@ -577,6 +944,8 @@ async def list_articles(request: Request):
             "topic": data["topic"],
             "title": data["title"],
             "created_at": data["created_at"],
+            "page_type": data.get("page_type", "blog"),
+            "image_count": data.get("image_count", 0),
             "pushed": data.get("pushed", False),
         })
     return articles
@@ -643,6 +1012,17 @@ async def push_article(request: Request, article_id: str, body: PushRequest):
         target_path = article_file.relative_to(work_dir.resolve()).as_posix()
         article_file.parent.mkdir(parents=True, exist_ok=True)
         article_file.write_text(html_content, encoding="utf-8")
+        staged_paths = [target_path]
+        generated_assets = GENERATED_DIR / "assets" / article_id
+        if generated_assets.is_dir():
+            repo_assets = article_file.parent / "images"
+            repo_assets.mkdir(parents=True, exist_ok=True)
+            for asset in generated_assets.iterdir():
+                if not asset.is_file():
+                    continue
+                destination = repo_assets / asset.name
+                shutil.copy2(asset, destination)
+                staged_paths.append(destination.relative_to(work_dir.resolve()).as_posix())
 
         # Git operations
         async def git(*args):
@@ -658,7 +1038,7 @@ async def push_article(request: Request, article_id: str, body: PushRequest):
         if code != 0:
             errors.append(f"创建分支失败: {stderr.decode().strip()}")
 
-        code, _, stderr = await git("add", target_path)
+        code, _, stderr = await git("add", *staged_paths)
         if code != 0:
             errors.append(f"添加文件失败: {stderr.decode().strip()}")
 
@@ -784,13 +1164,89 @@ def _extract_title(html_content: str) -> str:
     return ""
 
 
+def _sanitize_generated_html(html_content: str) -> str:
+    """Remove executable content from model-generated article HTML."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html_content, "html.parser")
+    for tag in soup.find_all(["script", "iframe", "object", "embed", "form", "base"]):
+        tag.decompose()
+    for tag in soup.find_all(True):
+        for attr in list(tag.attrs):
+            if attr.lower().startswith("on"):
+                del tag.attrs[attr]
+        for attr in ("href", "src", "action"):
+            value = tag.get(attr)
+            if isinstance(value, str) and value.strip().lower().startswith(
+                ("javascript:", "data:text/html")
+            ):
+                del tag.attrs[attr]
+    return str(soup)
+
+
+async def _resolve_article_type(
+    settings,
+    *,
+    topic: str,
+    keywords: str,
+    language: str,
+    requested: str,
+) -> str:
+    """Let AI choose a format when the caller requests automatic selection."""
+    allowed = {"blog", "market_analysis", "product_review", "guide", "news", "landing"}
+    if requested in allowed:
+        return requested
+
+    combined = f"{topic} {keywords}".casefold()
+    if any(term in combined for term in ("how to", "guide", "教程", "指南", "方法")):
+        fallback = "guide"
+    elif any(term in combined for term in ("trend", "market", "forecast", "趋势", "市场", "预测")):
+        fallback = "market_analysis"
+    elif any(term in combined for term in ("compare", "review", "best", "对比", "评测", "推荐")):
+        fallback = "product_review"
+    elif any(term in combined for term in ("news", "latest", "today", "新闻", "最新", "今日")):
+        fallback = "news"
+    else:
+        fallback = "blog"
+
+    from src.ai.deepseek_client import DeepSeekClient
+
+    client = DeepSeekClient(
+        api_key=settings.deepseek_api_key,
+        model=settings.deepseek_model,
+        timeout=settings.deepseek_timeout,
+    )
+    try:
+        result = await client.generate_json(
+            f"""Choose the best article format for this topic.
+Topic: {topic}
+Keywords: {keywords or 'none'}
+Language: {language}
+
+Return one field named page_type with exactly one value from:
+blog, market_analysis, product_review, guide, news, landing.
+Use news only for genuinely time-sensitive topics; use landing only for transactional intent.""",
+            system="You are a digital editor choosing the most useful content format.",
+            temperature=0.1,
+            max_tokens=200,
+        )
+        selected = result.get("page_type") if isinstance(result, dict) else None
+        return selected if selected in allowed else fallback
+    except Exception as exc:
+        logger.warning("AI article type selection failed, using %s: %s", fallback, exc)
+        return fallback
+    finally:
+        await client.close()
+
+
 # ── Prompt Builder ────────────────────────────────────────────────
 
 def _build_article_prompt(
     topic: str, keywords: str, language: str, word_count: int, page_type: str,
+    research_findings: str = "",
+    site_research: str = "",
 ) -> str:
-    from datetime import datetime
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
 
     lang_name = {
         "en": "English", "ja": "Japanese", "zh": "Chinese",
@@ -834,7 +1290,13 @@ def _build_article_prompt(
 
     structure_hint = type_structure.get(page_type, "")
 
+    citation_section = research_findings if research_findings else ""
+
     return f"""Write a complete, SEO-optimized HTML article.
+
+{citation_section}
+
+{site_research}
 
 Topic: {topic}
 Article Type: {type_label}
@@ -890,4 +1352,6 @@ IMPORTANT:
 - Naturally include keywords without stuffing
 - Use proper heading hierarchy (H1 → H2 → no skips)
 - Include specific examples, data, or practical insights
+- Do not invent facts about the site; use only the verified site context above
+- Treat reference articles as structural research only and never copy their wording
 - Output RAW HTML only — no markdown backticks, no explanations"""

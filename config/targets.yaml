@@ -36,6 +36,7 @@ targets:
       baidu: "codeva-wjmEvlNTcJ"
       bing: "F3B0CBD6AC9BC7F82E8DCC05E28E4CD3"
     geo:
+      enabled: false
       latitude: 22.3193
       longitude: 114.1694
       region: "HK"

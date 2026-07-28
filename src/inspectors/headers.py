@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional, Set
+from typing import Optional
 
 from src.inspectors.base import BaseInspector, RawFinding
 
@@ -78,8 +78,18 @@ class HeadersInspector(BaseInspector):
 
     inspector_name = "headers"
 
-    def __init__(self) -> None:
-        self._checked_urls: Set[str] = set()
+    # Server-level categories: reported ONCE per scan, not per page
+    SERVER_LEVEL_CATEGORIES: set[str] = {
+        "missing_strict_transport_security", "hsts_max_age_too_short",
+        "missing_content_security_policy", "missing_x_frame_options",
+        "missing_x_frame_options_with_csp", "missing_x_content_type_options",
+        "missing_referrer_policy", "missing_permissions_policy",
+        "missing_cross_origin_opener_policy", "missing_cross_origin_resource_policy",
+        "missing_cross_origin_embedder_policy", "info_leak_server",
+        "info_leak_x_powered_by", "info_leak_x_aspnet_version",
+        "info_leak_x_generator", "info_leak_x_drupal_cache",
+        "info_leak_x_drupal_dynamic_cache", "missing_compression",
+    }
 
     async def setup(self) -> None:
         pass
@@ -111,6 +121,10 @@ class HeadersInspector(BaseInspector):
         findings.extend(self._check_x_robots_tag(url, lower_headers, html_content))
         findings.extend(self._check_content_type_charset(url, lower_headers))
 
+        for finding in findings:
+            if finding.category in self.SERVER_LEVEL_CATEGORIES:
+                finding.scope = "site"
+                finding.group_key = finding.category
         return findings
 
     # ── Security Headers ────────────────────────────────────────────

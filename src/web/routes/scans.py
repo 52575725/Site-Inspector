@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
@@ -21,6 +22,20 @@ class QuickScanRequest(BaseModel):
     repo_url: str | None = None
     repo_branch: str = "main"
     push_changes: bool = False
+
+
+def resolve_quick_scan_target_name(url: str, explicit_name: str | None, settings) -> str:
+    if explicit_name:
+        return explicit_name
+    requested_host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    configured = settings.__class__.load_target(settings.target_name)
+    configured_url = configured.get("base_url") or settings.target_base_url
+    configured_host = (
+        (urlparse(configured_url).hostname or "").lower().removeprefix("www.")
+    )
+    if requested_host and requested_host == configured_host:
+        return settings.target_name
+    return requested_host.replace(".", "-") or "quick-scan"
 
 
 @router.get("/scans")
@@ -173,13 +188,9 @@ async def trigger_quick_scan(request: Request,
     """Trigger an on-demand quick scan for an arbitrary URL."""
     url = await validate_public_http_url(body.url)
 
-    from urllib.parse import urlparse
-
-    parsed = urlparse(url)
-    target_name = body.name or parsed.netloc.replace("www.", "").replace(".", "-")
-
     factory = request.app.state.session_factory
     settings = request.app.state.settings
+    target_name = resolve_quick_scan_target_name(url, body.name, settings)
 
     repo_url = None
     repo_branch = body.repo_branch

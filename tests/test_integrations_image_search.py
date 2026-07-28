@@ -67,7 +67,8 @@ def test_wikimedia_query_variants_broaden_long_editorial_title():
         "LBMA Good Delivery Standards: Complete Guide to Silver Bar Quality Specifications"
     )
 
-    assert variants[0] == "silver bullion ingot"
+    assert variants[0].startswith("LBMA Good Delivery Standards")
+    assert variants[1] == "silver bullion ingot"
     assert "Silver Bar" in variants
 
 

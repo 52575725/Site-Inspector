@@ -26,8 +26,17 @@ schedule_cmd = typer.Typer(name="schedule", help="Manage scheduled jobs")
 web_cmd = typer.Typer(name="web", help="Start the web dashboard")
 
 
-def _create_engine() -> Engine:
+def _create_engine(*, target_name: str | None = None, page_limit: int | None = None) -> Engine:
     settings = Settings.load()
+    if target_name:
+        target_config = Settings.load_target(target_name)
+        settings.target_name = target_name
+        settings.target_base_url = target_config.get("base_url", settings.target_base_url)
+        settings.target_languages = target_config.get("languages", settings.target_languages)
+    if page_limit is not None:
+        if page_limit < 1:
+            raise typer.BadParameter("--pages must be at least 1")
+        settings.crawl_max_pages = page_limit
     factory = get_session_factory(settings)
     return Engine(settings, factory)
 
@@ -42,14 +51,18 @@ def scan_run(
     ),
 ):
     """Run a full site inspection scan now."""
+    if inspectors != "all":
+        raise typer.BadParameter("Inspector subsets are not implemented; use --inspectors all")
+
     async def _run():
         await init_db()
-        engine = _create_engine()
+        engine = _create_engine(target_name=target, page_limit=pages)
         try:
             result = await engine.run_daily_scan(dry_run=not apply_fixes)
             console.print(f"[green]Scan completed![/green]")
             console.print(f"  Pages crawled: {result['pages']}")
             console.print(f"  Issues found: {result['new_issues']}")
+            console.print(f"  Fixes proposed: {result['fixes_proposed']}")
             console.print(f"  Fixes applied: {result['fixes_applied']}")
             console.print(f"  Report: {result['report_path']}")
         finally:

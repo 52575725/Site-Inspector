@@ -15,6 +15,17 @@ are disabled in the web application by default, and only deterministic
   robots.txt, headings, links, crawl budget, JavaScript SEO, and mobile checks.
 - Content analysis: quality, freshness, E-E-A-T signals, keyword overlap,
   content gaps, cannibalization, and competitor gaps.
+- Automatic article research: accepts a public website URL, detects the site's
+  business and audience from page evidence, proposes relevant keywords, studies
+  the heading structure and content patterns of public search-result articles,
+  and generates an original site-aligned HTML draft with a saved research report.
+- AI editorial strategy: checks current trend/news search-result signals, selects
+  the best-fit article type and search intent, and records a timely angle,
+  alternative headlines, rationale, and confidence without presenting search
+  coverage as verified traffic or virality.
+- Authority citations: AI may select only exact URLs returned by the current
+  research run, adds descriptive inline links where they support a claim, and
+  includes a clickable Sources section without inventing or rewriting URLs.
 - Rich results: Organization, WebSite, Product, Article, Breadcrumb, FAQ, and
   HowTo JSON-LD inspection and generation.
 - Images and performance: alt text analysis, image optimization, WebP support,
@@ -23,6 +34,11 @@ are disabled in the web application by default, and only deterministic
   stores attribution and license links, converts downloads to WebP, and proposes
   section-aware placement for editorial review. AI generation is off by default
   and is used only as an explicitly enabled fallback when search is insufficient.
+- Generated-article media workflow: opens image search directly from an AI draft,
+  lets the editor select licensed candidates, optionally fills shortages with
+  configured AI image generation, inserts each image into the most relevant
+  section, and returns the complete illustrated article in the same preview.
+  Draft assets are retained with the article and included in later GitHub pushes.
 - Controlled remediation: dry runs, approval classification, per-page fix
   limits, pre-change snapshots, validation, rollback, Git branches, and PRs.
 - Evidence-bound planning: a deterministic SEO Planning Agent orders work by
@@ -189,6 +205,36 @@ uv run site-inspector web start --host 127.0.0.1 --port 8000
 ```
 
 Then open `http://127.0.0.1:8000/`.
+
+Open `http://127.0.0.1:8000/articles` to generate an article. For the automatic
+workflow, enter a public website URL and select **网站研究并生成**. Topic and
+keywords are optional: when omitted, the workflow derives them from the site.
+Leave the article type at **AI 自动选择（推荐）** to let the editor choose among
+blog, market analysis, product review, guide, news, and landing-page formats.
+It validates public URLs and redirects, observes `robots.txt`, keeps only
+reference-page structure and aggregate statistics, and does not copy reference
+article bodies. Generated drafts and their research reports are saved under
+`data/generated/` for review; repository publishing remains a separate,
+write-gated action.
+
+### Research-first article workflow
+
+The website article workflow is split into two stages. **Start website and user
+intent research** profiles the public site, derives keywords, discovers or simulates
+natural-language queries, validates simulated queries against live search results,
+and studies readable public reference pages. It reports heading structure, word and
+content-image counts, paragraphs, tables, FAQ, lists, CTA patterns, and aggregate
+benchmarks before any draft is written. The research screen produces an editable
+brief with a headline, article type, target length, image range, outline, validated
+questions, and differentiation opportunities. Only **Confirm brief and generate
+article** invokes the writing model.
+
+Free search results are coverage signals, not verified Google rankings, and query
+volume remains unknown unless a real keyword-data provider is configured. AI-only
+queries remain visibly labeled and are excluded from the validated brief when live
+search produces no supporting result. Research plans are saved under
+`data/generated/research-plans/`; confirmed drafts and reports are saved under
+`data/generated/`.
 
 ## Quality Checks
 

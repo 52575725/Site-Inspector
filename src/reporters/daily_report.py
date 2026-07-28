@@ -473,14 +473,14 @@ TEMPLATE = r"""<!DOCTYPE html>
     {% endfor %}
 </div>
 
-<!-- Fixes applied -->
-<h2>本日自动修复 ({{ fixes|length }})</h2>
+<!-- Fix proposals and execution results -->
+<h2>修复建议与执行结果 ({{ fixes|length }})</h2>
 {% if fixes %}
     <ul class="fix-list">
         {% for fix in fixes %}
         <li class="{{ 'semi' if fix.fix_type == 'semi_auto' else '' }}">
             <strong>{{ "半自动" if fix.fix_type == "semi_auto" else "全自动" }}</strong>
-            &mdash; {{ fix.fixer_label }}：
+            &mdash; {{ fix.fixer_label }} [{{ fix.status }}]：
             <code>{{ fix.file_path }}</code>
             {% if fix.git_pr_url %} <a href="{{ fix.git_pr_url }}">查看 PR</a>{% endif %}
         </li>
@@ -599,6 +599,7 @@ class DailyReportGenerator:
                 "fixer_label": FIXER_LABELS.get(f.fixer, f.fixer),
                 "file_path": f.file_path,
                 "git_pr_url": f.git_pr_url,
+                "status": f.status,
             })
 
         template = Environment(autoescape=True).from_string(TEMPLATE)
@@ -642,10 +643,12 @@ class DailyReportGenerator:
             lines.append(f"  {label}: {len(items)} issues ({p0_count} P0, {p1_count} P1)")
 
         if fixes:
-            lines.append(f"\n--- Fixes Applied ({len(fixes)}) ---")
+            lines.append(f"\n--- Fix Proposals and Results ({len(fixes)}) ---")
             for f in fixes:
                 label = FIXER_LABELS.get(f.fixer, f.fixer)
-                lines.append(f"  [{f.fix_type}] {label}: {f.file_path or '?'}")
+                lines.append(
+                    f"  [{f.status}/{f.fix_type}] {label}: {f.file_path or '?'}"
+                )
 
         return "\n".join(lines)
 

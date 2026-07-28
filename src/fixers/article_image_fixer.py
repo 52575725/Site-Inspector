@@ -513,8 +513,9 @@ class ArticleImageFixer(BaseFixer):
         """Return an error when insertion changed article content or core structure."""
         original = BeautifulSoup(original_html, "html.parser")
         reparsed = BeautifulSoup(str(modified_soup), "html.parser")
+        original_figures = original.select("figure.article-media")
         figures = reparsed.select("figure.article-media")
-        if len(figures) != expected_inserted:
+        if len(figures) != len(original_figures) + expected_inserted:
             return "inserted figure count changed after HTML parsing"
         for figure in figures:
             image = figure.find("img", recursive=False)
@@ -530,8 +531,13 @@ class ArticleImageFixer(BaseFixer):
         modified_main = cls._find_main(reparsed)
         if original_main is None or modified_main is None:
             return "article content container is missing"
+        for figure in original_main.select("figure.article-media"):
+            figure.decompose()
         for figure in modified_main.select("figure.article-media"):
             figure.decompose()
+        original_style = original.find("style", id="site-inspector-article-images")
+        if original_style:
+            original_style.decompose()
         style = reparsed.find("style", id="site-inspector-article-images")
         if style:
             style.decompose()
@@ -655,11 +661,32 @@ class ArticleImageFixer(BaseFixer):
         head.append(style)
 
     @staticmethod
-    def _build_generation_prompt(query: str) -> str:
+    def _build_generation_prompt(
+        query: str,
+        *,
+        article_title: str = "",
+        section_headings: list[str] | None = None,
+        avoid_concepts: list[str] | None = None,
+        variation_index: int = 0,
+    ) -> str:
+        visual_directions = (
+            "a specific real-world subject in its working environment",
+            "a detailed process-focused scene with meaningful objects and human scale",
+            "a location-rich wide scene that makes the operational context unmistakable",
+            "a precise editorial still life using objects directly discussed in the section",
+        )
+        sections = "; ".join((section_headings or [])[:6]) or "not provided"
+        avoid = "; ".join((avoid_concepts or [])[-6:]) or "none"
         return (
             "Use case: photorealistic-natural. Asset type: editorial blog illustration. "
-            f"Primary request: create an accurate landscape image for this article section: {query}. "
-            "Composition: wide 3:2 editorial framing with one clear subject. "
+            f"Article title: {article_title or query}. Current section visual brief: {query}. "
+            f"Other article sections for context only: {sections}. "
+            "The image must visibly connect the article's primary subject with the current section; "
+            "do not create a generic business, office, handshake, abstract finance, or unrelated stock scene. "
+            f"Visual direction: {visual_directions[variation_index % len(visual_directions)]}. "
+            f"Avoid repeating these previously used scene concepts: {avoid}. "
+            "Composition: wide 3:2 editorial framing, one clear focal subject, natural light, "
+            "credible materials and scale, and a composition distinct from earlier images. "
             "Constraints: factual, professional, no logos, no certificates, no text, no watermark."
         )
 

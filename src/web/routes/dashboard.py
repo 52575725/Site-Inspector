@@ -172,7 +172,7 @@ async def dashboard_trend(request: Request):
     async with factory() as session:
         scans_result = await session.execute(
             select(Scan.id, Scan.started_at, Scan.total_issues_found, Scan.pages_crawled)
-            .where(Scan.status == "completed")
+            .where(Scan.status.in_(("completed", "degraded")))
             .order_by(Scan.started_at.desc())
             .limit(10)
         )

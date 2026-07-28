@@ -4,9 +4,8 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-
-from src.web.deps import templates
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +22,8 @@ class WebPRequest(BaseModel):
 
 @router.get("/tools")
 async def tools_page(request: Request):
-    """Render the tools page."""
-    return templates.TemplateResponse(request, "tools.html")
+    """Redirect the retired manual tools page to the dashboard."""
+    return RedirectResponse(url="/", status_code=307)
 
 
 # ── Competitor Tracking ─────────────────────────────────────────
@@ -73,6 +72,58 @@ async def convert_webp(request: Request, body: WebPRequest):
 
 
 # ── GSC Data ────────────────────────────────────────────────────
+
+@router.get("/api/tools/external-links/platforms")
+async def external_link_platforms(request: Request):
+    """Get business registration platform checklist for external links."""
+    settings = request.app.state.settings
+    target_config = settings.__class__.load_target(settings.target_name)
+    from src.inspectors.external_references import ExternalReferencesInspector
+    inspector = ExternalReferencesInspector(target_config=target_config)
+    return {
+        "platforms": inspector.get_registration_checklist(),
+        "business_name": target_config.get("organization", {}).get("name", ""),
+    }
+
+
+@router.get("/api/tools/external-links/check")
+async def check_external_link(url: str, request: Request):
+    """Test a single external link with browser-level verification."""
+    import asyncio as _asyncio
+    import httpx as _httpx
+
+    result = {"url": url, "reachable": False, "status": None, "method": "head"}
+
+    # Step 1: HEAD request
+    try:
+        async with _httpx.AsyncClient(timeout=10) as client:
+            resp = await client.head(url, follow_redirects=True)
+            result["status"] = resp.status_code
+            if resp.status_code < 400:
+                result["reachable"] = True
+                return result
+            if resp.status_code in (403, 406, 405):
+                result["method"] = "browser"
+    except Exception:
+        result["method"] = "browser"
+
+    # Step 2: Playwright browser fallback
+    try:
+        from playwright.async_api import async_playwright
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
+        page = await browser.new_page()
+        resp = await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        result["status"] = resp.status if resp else 200
+        result["reachable"] = result["status"] < 400 if result["status"] else True
+        result["method"] = "browser"
+        await browser.close()
+        await pw.stop()
+    except Exception as e:
+        result["error"] = str(e)[:200]
+
+    return result
+
 
 @router.get("/api/tools/gsc/summary")
 async def gsc_summary(request: Request):

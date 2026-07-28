@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,10 @@ from typing import Optional
 from urllib.parse import quote, urlparse
 
 logger = logging.getLogger(__name__)
+
+_WIKIMEDIA_REQUEST_LOCK = threading.Lock()
+_WIKIMEDIA_LAST_REQUEST = 0.0
+_WIKIMEDIA_MIN_INTERVAL_SECONDS = 0.8
 
 
 @dataclass
@@ -399,8 +404,7 @@ def _search_wikimedia(query: str, count: int) -> list[ImageResult]:
     results = []
     seen_urls = set()
     query_variants = _wikimedia_query_variants(query)
-    visual_intent = query_variants[0]
-    for search_query in query_variants:
+    for search_query in query_variants[:3]:
         url = (
             "https://commons.wikimedia.org/w/api.php?action=query&generator=search"
             f"&gsrsearch={quote('file:' + search_query)}&gsrnamespace=6"
@@ -411,8 +415,7 @@ def _search_wikimedia(query: str, count: int) -> list[ImageResult]:
         req = urllib.request.Request(url, headers={
             "User-Agent": "SiteInspector/1.0 (article image research)",
         })
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        data = json.loads(_read_wikimedia_response(req).decode("utf-8"))
 
         pages = data.get("query", {}).get("pages", {})
         for page in pages.values():
@@ -436,6 +439,7 @@ def _search_wikimedia(query: str, count: int) -> list[ImageResult]:
             title = page.get("title", "").removeprefix("File:")
             description = meta("ImageDescription") or title or search_query
             categories = meta("Categories")
+            visual_intent = _visual_query_for(search_query) or search_query
             if not _matches_visual_intent(visual_intent, title, description, categories):
                 continue
             license_name = meta("LicenseShortName") or meta("UsageTerms")
@@ -459,6 +463,35 @@ def _search_wikimedia(query: str, count: int) -> list[ImageResult]:
     return results
 
 
+def _read_wikimedia_response(request) -> bytes:
+    """Serialize Commons requests and retry a single rate-limited response."""
+    import urllib.error
+    import urllib.request
+
+    global _WIKIMEDIA_LAST_REQUEST
+    with _WIKIMEDIA_REQUEST_LOCK:
+        elapsed = time.monotonic() - _WIKIMEDIA_LAST_REQUEST
+        if elapsed < _WIKIMEDIA_MIN_INTERVAL_SECONDS:
+            time.sleep(_WIKIMEDIA_MIN_INTERVAL_SECONDS - elapsed)
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    payload = response.read()
+                _WIKIMEDIA_LAST_REQUEST = time.monotonic()
+                return payload
+            except urllib.error.HTTPError as exc:
+                _WIKIMEDIA_LAST_REQUEST = time.monotonic()
+                if exc.code != 429 or attempt == 1:
+                    raise
+                retry_after = exc.headers.get("Retry-After", "3")
+                try:
+                    delay = float(retry_after)
+                except ValueError:
+                    delay = 3.0
+                time.sleep(min(max(delay, 1.0), 10.0))
+    return b"{}"
+
+
 def _wikimedia_query_variants(query: str) -> list[str]:
     """Create progressively broader visual queries for long editorial headings."""
     words = re.findall(r"[A-Za-z0-9]+|[\u3040-\u30ff\u3400-\u9fff]+", query)
@@ -473,7 +506,9 @@ def _wikimedia_query_variants(query: str) -> list[str]:
     compact = [word for word in words if word.lower() not in stopwords and not word.isdigit()]
     without_acronyms = [word for word in compact if not (word.isupper() and len(word) > 1)]
     visual_query = _visual_query_for(query)
-    variants = [visual_query, query]
+    # Preserve the full article intent before trying broader visual phrases.
+    # This avoids filling the result set with generic stock imagery too early.
+    variants = [query, visual_query]
     if compact:
         variants.append(" ".join(compact[:5]))
     if without_acronyms:

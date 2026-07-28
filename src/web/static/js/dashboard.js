@@ -76,6 +76,9 @@ async function loadPlan() {
              <div class="ps defer"><div class="ps-val">${deferred}</div><div class="ps-lbl">Deferred</div></div>
              <div class="ps"><div class="ps-val">${p.warnings ? p.warnings.length : 0}</div><div class="ps-lbl">Warnings</div></div>`;
         document.getElementById('plan-exec-summary').textContent = p.executive_summary || '';
+        if (p.ai_strategy_note) {
+            document.getElementById('plan-exec-summary').textContent += ` AI advisory: ${p.ai_strategy_note}`;
+        }
         document.getElementById('plan-exec-summary').style.display = p.executive_summary ? '' : 'none';
 
         // Phase groups
@@ -110,7 +113,7 @@ async function loadCompetitors() {
     try {
         const resp = await fetch('/api/scans');
         const scans = await resp.json();
-        const latest = scans.find(s => s.status === 'completed');
+        const latest = scans.find(s => ['completed', 'degraded'].includes(s.status));
         if (!latest) return;
         const issuesResp = await fetch(`/api/issues?inspector=competitor_gap&scan_id=${latest.id}`);
         const data = await issuesResp.json();
@@ -171,11 +174,14 @@ function pollScan(scanId, progress, result) {
             const s = await r.json();
             const phase = labels[s.phase] || s.phase;
             progress.innerHTML = `${phase}${s.pages_crawled > 0 ? ` (${s.pages_crawled} pages, ${s.total_issues_found || 0} issues)` : ''}`;
-            if (s.status === 'completed') {
+            if (['completed', 'degraded'].includes(s.status)) {
                 clearInterval(pollTimer);
                 progress.style.display = 'none';
                 result.style.display = '';
-                result.innerHTML = `<div class="qs-done"><strong>Scan Complete</strong>
+                const healthLabel = s.status === 'degraded'
+                    ? 'Scan Complete with Inspector Errors'
+                    : 'Scan Complete';
+                result.innerHTML = `<div class="qs-done"><strong>${healthLabel}</strong>
                     <div class="qs-stats"><span>${s.pages_crawled} pages</span><span>${s.total_issues_found} issues</span><span><a href="/issues?scan_id=${s.id}">View Issues</a></span></div>
                     ${s.pr_url ? `<div style="margin-top:6px;"><a href="${escapeHtml(s.pr_url)}" target="_blank">View PR</a></div>` : ''}</div>`;
                 document.getElementById('quick-scan-btn').disabled = false;

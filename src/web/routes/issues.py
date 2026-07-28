@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select, func
 from sqlalchemy.orm import joinedload
 
@@ -23,9 +24,7 @@ INSPECTOR_LABELS = {
 
 @router.get("/issues")
 async def issues_page(request: Request):
-    return templates.TemplateResponse(request, "issues.html", {
-        "inspector_labels": INSPECTOR_LABELS,
-    })
+    return RedirectResponse(url="/", status_code=307)
 
 
 @router.get("/issues/{issue_id}")

@@ -26,6 +26,8 @@ class MemorySource(BaseSource):
         return None
 
     async def read_file(self, relative_path: str) -> str:
+        if relative_path not in self.files:
+            raise FileNotFoundError(relative_path)
         return self.files[relative_path]
 
     async def write_file(self, relative_path: str, content: str) -> None:
@@ -36,6 +38,22 @@ class MemorySource(BaseSource):
 
     async def disconnect(self):
         return None
+
+
+@pytest.mark.asyncio
+async def test_root_url_maps_to_index_file():
+    assert await FixOrchestrator._url_to_file_path("https://example.com") == "index.html"
+    assert await FixOrchestrator._url_to_file_path("https://example.com/") == "index.html"
+
+
+@pytest.mark.asyncio
+async def test_missing_localized_url_is_not_fuzzily_mapped_to_unrelated_page():
+    source = MemorySource(ORIGINAL)
+    path = await FixOrchestrator._url_to_file_path(
+        "https://example.com/jp/blog/missing-article/", source,
+    )
+
+    assert path is None
 
 
 class CorruptingFixer(BaseFixer):

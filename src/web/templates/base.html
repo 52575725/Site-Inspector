@@ -19,20 +19,11 @@
             <a href="/" class="nav-item {% if request.url.path == '/' %}active{% endif %}">
                 &#9632; Dashboard
             </a>
-            <a href="/issues" class="nav-item {% if request.url.path.startswith('/issues') %}active{% endif %}">
-                &#9888; Issues
-            </a>
-            <a href="/fixes" class="nav-item {% if request.url.path.startswith('/fixes') %}active{% endif %}">
-                &#9874; Fixes
-            </a>
             <a href="/articles" class="nav-item {% if request.url.path.startswith('/articles') %}active{% endif %}">
                 &#9997; AI Articles
             </a>
             <a href="/article-images" class="nav-item {% if request.url.path.startswith('/article-images') %}active{% endif %}">
                 &#9638; Article Images
-            </a>
-            <a href="/tools" class="nav-item {% if request.url.path.startswith('/tools') %}active{% endif %}">
-                &#128295; Tools
             </a>
             <a href="/trends" class="nav-item {% if request.url.path.startswith('/trends') %}active{% endif %}">
                 &#128200; Trends

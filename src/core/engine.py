@@ -130,7 +130,9 @@ class Engine:
                 if evidence_scores else 1.0
             )
             # Quick fix trust: did any fixes fail validation?
-            fix_attempted = len(fixes)
+            fix_attempted = sum(
+                fix.status in {"applied", "validation_failed"} for fix in fixes
+            )
             fix_failed = sum(1 for f in fixes if f.status == "validation_failed")
             fix_success_rate = (
                 1.0 - (fix_failed / max(fix_attempted, 1))
@@ -157,7 +159,8 @@ class Engine:
             "scan_id": scan.id,
             "pages": scan.pages_crawled,
             "new_issues": scan.total_issues_found,
-            "fixes_applied": len(fixes),
+            "fixes_applied": len(applied_fixes),
+            "fixes_proposed": sum(fix.status == "proposed" for fix in fixes),
             "report_path": str(report_path),
             "plan_path": str(plan_path) if plan_path else None,
             "planned_actions": len(plan.actions) if plan else 0,
