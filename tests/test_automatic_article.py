@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -17,6 +18,360 @@ from src.ai.automatic_article import (
     TrendCandidate,
 )
 from src.web.routes import articles
+
+
+def test_detects_primary_and_alternate_site_languages_from_html_evidence():
+    homepage = AutomaticArticleWorkflow._extract_site_page(
+        "https://example.com/",
+        """<html lang="en"><head>
+        <link rel="alternate" hreflang="en" href="https://example.com/">
+        <link rel="alternate" hreflang="ja-JP" href="https://example.com/jp/">
+        </head><body><h1>Silver market guidance</h1></body></html>""",
+    )
+    japanese = AutomaticArticleWorkflow._extract_site_page(
+        "https://example.com/jp/",
+        "<html lang='ja'><body><h1>日本語の記事と市場情報</h1></body></html>",
+    )
+
+    primary, detected, evidence = AutomaticArticleWorkflow._detect_site_languages(
+        [homepage, japanese],
+        requested_language="auto",
+    )
+
+    assert primary == "en"
+    assert detected[:2] == ["en", "ja"]
+    assert any("hreflang=ja" in item for item in evidence)
+
+
+def test_rejects_exact_and_lightly_rephrased_existing_titles():
+    existing = ["How to Verify LBMA Compliance When Sourcing Silver Bars from Hong Kong"]
+
+    assert AutomaticArticleWorkflow._titles_too_similar(existing[0], existing)
+    assert AutomaticArticleWorkflow._titles_too_similar(
+        "LBMA Compliance Checklist for Silver Bars Sourced from Hong Kong Exporters",
+        existing,
+    )
+    assert not AutomaticArticleWorkflow._titles_too_similar(
+        "Why Electronics Manufacturing Is Increasing Industrial Silver Demand",
+        existing,
+    )
+
+
+def test_auto_editorial_search_fallback_is_broader_than_commercial_topics():
+    queries = AutomaticArticleWorkflow._build_editorial_search_queries(
+        "precious metals",
+        ["industrial silver demand", "silver supply"],
+        content_direction="auto",
+    )
+
+    assert any("latest news" in query for query in queries)
+    assert any("industry trends" in query for query in queries)
+    assert any("market update" in query for query in queries)
+    assert any("data analysis" in query for query in queries)
+    assert any("origin history" in query for query in queries)
+    assert any("culture symbolism" in query for query in queries)
+    assert any("unexpected uses" in query for query in queries)
+
+
+def test_profile_keywords_keep_user_hints_and_limit_trade_location_cluster():
+    narrow = [
+        "Hong Kong silver supplier",
+        "Hong Kong silver buying guide",
+        "silver customs clearance",
+        "silver import rules",
+        "silver export compliance",
+        "silver wholesale sourcing",
+        "silver freight shipping",
+        "silver tariff guide",
+    ]
+    broad = [
+        "how silver tarnish forms",
+        "silver jewelry origin stories",
+        "traditional silver craftsmanship",
+        "silver in contemporary design",
+        "unexpected uses of silver",
+        "silver conservation science",
+        "famous silver objects in history",
+        "silver recycling innovations",
+        "silver symbolism across cultures",
+        "future of wearable silver",
+    ]
+
+    result = AutomaticArticleWorkflow._diversify_profile_keywords(
+        narrow + broad + ["silver in historical mysteries"],
+        explicit_keywords=["custom silver keepsakes"],
+        limit=30,
+    )
+
+    assert result[0] == "custom silver keepsakes"
+    assert "silver in historical mysteries" in result
+    assert sum(item in narrow for item in result) <= 6
+    assert sum(item in narrow for item in result[:8]) <= 2
+
+
+@pytest.mark.asyncio
+async def test_build_profile_keeps_up_to_thirty_ai_keywords():
+    generated_keywords = [f"distinct silver editorial angle {index}" for index in range(25)]
+
+    class FakeAI:
+        async def generate_json(self, prompt, **kwargs):
+            assert "20-30" in prompt
+            assert "non-exhaustive" in prompt
+            return {
+                "site_name": "Example Silver",
+                "business_summary": "A silver jewelry studio.",
+                "niche": "silver jewelry",
+                "target_audience": ["collectors"],
+                "offerings": ["silver jewelry"],
+                "keywords": generated_keywords,
+                "recommended_topic": "The changing meanings of silver jewelry",
+            }
+
+    workflow = AutomaticArticleWorkflow(
+        Settings(deepseek_api_key="test"),
+        http_client=object(),
+        ai_client=FakeAI(),
+    )
+    profile = await workflow._build_profile(
+        "https://example.com",
+        [{
+            "url": "https://example.com",
+            "title": "Example Silver",
+            "description": "A silver jewelry studio.",
+            "headings": [],
+        }],
+        language="en",
+        topic_hint="",
+        keyword_hint="handmade silver gifts, silver family traditions",
+    )
+
+    assert profile.keywords[:2] == ["handmade silver gifts", "silver family traditions"]
+    assert len(profile.keywords) == 27
+    assert generated_keywords[-1] in profile.keywords
+
+
+@pytest.mark.asyncio
+async def test_ai_can_invent_open_ended_editorial_discovery_queries():
+    class FakeAI:
+        async def generate_json(self, prompt, **kwargs):
+            assert "non-exhaustive" in prompt
+            assert "explore freely" in prompt
+            return {
+                "queries": [
+                    "silver jewelry in maritime wedding rituals oral histories",
+                    "how museum conservators diagnose tarnished silver",
+                    "silver objects as clues in historical crime investigations",
+                ]
+            }
+
+    workflow = AutomaticArticleWorkflow(
+        Settings(deepseek_api_key="test"),
+        http_client=object(),
+        ai_client=FakeAI(),
+    )
+    queries = await workflow._discover_editorial_queries(
+        SiteProfile(
+            website_url="https://example.com",
+            site_name="Example Silver",
+            business_summary="A silver jewelry studio.",
+            niche="silver jewelry",
+            keywords=["silver jewelry"],
+        ),
+        content_direction="auto",
+    )
+
+    assert "how museum conservators diagnose tarnished silver" in queries
+    assert any("crime investigations" in query for query in queries)
+
+
+def test_open_topic_candidates_keep_novel_lenses_and_limit_procurement():
+    candidates = AutomaticArticleWorkflow._clean_topic_candidates(
+        [
+            {
+                "topic": "How to buy silver jewelry in Hong Kong",
+                "headline": "A Hong Kong Silver Jewelry Buying Guide",
+                "editorial_lens": "local buyer journey",
+                "content_direction": "buyer_question",
+            },
+            {
+                "topic": "How to choose a Hong Kong silver supplier",
+                "headline": "Choosing a Hong Kong Silver Supplier",
+                "editorial_lens": "supplier selection",
+                "content_direction": "buyer_question",
+            },
+            {
+                "topic": "What tarnish reveals to museum conservators",
+                "headline": "Reading Silver Tarnish Like a Conservator",
+                "editorial_lens": "forensic conservation",
+                "content_direction": "deep_analysis",
+            },
+            {
+                "topic": "Silver jewelry carried along old sea routes",
+                "headline": "The Sea Routes Hidden Inside Silver Jewelry",
+                "editorial_lens": "objects as maps of migration",
+                "content_direction": "evergreen_guide",
+            },
+        ],
+        excluded_topics=[],
+        allowed_urls=set(),
+        allowed_directions={
+            "news", "industry_trend", "market_event", "evergreen_guide",
+            "buyer_question", "deep_analysis",
+        },
+        allowed_types={"blog", "market_analysis", "product_review", "guide", "news", "landing"},
+        enforce_open_diversity=True,
+    )
+
+    assert len(candidates) == 3
+    assert [item["editorial_lens"] for item in candidates] == [
+        "local buyer journey",
+        "forensic conservation",
+        "objects as maps of migration",
+    ]
+
+
+def test_fixed_direction_is_applied_to_every_candidate_without_commercial_limit():
+    candidates = AutomaticArticleWorkflow._clean_topic_candidates(
+        [
+            {
+                "topic": "Silver ring sizing questions",
+                "editorial_lens": "fit and measurement",
+                "content_direction": "buyer_question",
+            },
+            {
+                "topic": "Silver hallmark questions",
+                "editorial_lens": "authenticity checks",
+                "content_direction": "deep_analysis",
+            },
+        ],
+        excluded_topics=[],
+        allowed_urls=set(),
+        allowed_directions={"buyer_question"},
+        allowed_types={"blog", "guide"},
+        enforce_open_diversity=False,
+        forced_direction="buyer_question",
+    )
+
+    assert len(candidates) == 2
+    assert {item["content_direction"] for item in candidates} == {"buyer_question"}
+
+
+def test_topic_candidates_are_distinct_and_exclude_existing_coverage():
+    candidates = AutomaticArticleWorkflow._clean_topic_candidates(
+        [
+            {"topic": "Existing LBMA sourcing guide", "headline": "Existing LBMA sourcing guide"},
+            {
+                "topic": "Industrial silver demand from solar manufacturing",
+                "headline": "How Solar Manufacturing Is Changing Silver Demand",
+                "content_direction": "industry_trend",
+                "page_type": "market_analysis",
+                "recommended_outline": ["Demand signal", "Supply impact"],
+            },
+            {
+                "topic": "Solar manufacturing and industrial silver demand",
+                "headline": "Silver Demand From Solar",
+                "content_direction": "industry_trend",
+                "page_type": "blog",
+            },
+            {
+                "topic": "New customs reporting rules for precious-metal imports",
+                "headline": "What New Customs Reporting Rules Mean for Silver Buyers",
+                "content_direction": "news",
+                "page_type": "news",
+                "source_urls": ["https://authority.example/update"],
+            },
+        ],
+        excluded_topics=["Existing LBMA sourcing guide"],
+        allowed_urls={"https://authority.example/update"},
+        allowed_directions={
+            "news", "industry_trend", "market_event", "evergreen_guide",
+            "buyer_question", "deep_analysis",
+        },
+        allowed_types={"blog", "market_analysis", "product_review", "guide", "news", "landing"},
+    )
+
+    assert len(candidates) == 2
+    assert {item["content_direction"] for item in candidates} == {"industry_trend", "news"}
+    assert candidates[1]["source_urls"] == ["https://authority.example/update"]
+
+
+def test_old_regime_effective_year_is_removed_from_evergreen_headline():
+    candidates = AutomaticArticleWorkflow._clean_topic_candidates(
+        [{
+            "topic": "Understanding Hong Kong's Precious Metals Dealer Registration Regime",
+            "headline": (
+                "Hong Kong Silver Exporter Compliance: Navigating the 2023 "
+                "Precious Metals Dealer Registration"
+            ),
+            "content_direction": "evergreen_guide",
+            "page_type": "guide",
+            "freshness_basis": "The regime took effect in 2023 and remains active.",
+        }],
+        excluded_topics=[],
+        allowed_urls=set(),
+        allowed_directions={
+            "news", "industry_trend", "market_event", "evergreen_guide",
+            "buyer_question", "deep_analysis",
+        },
+        allowed_types={"blog", "market_analysis", "product_review", "guide", "news", "landing"},
+    )
+
+    assert len(candidates) == 1
+    assert "2023" not in candidates[0]["headline"]
+    assert candidates[0]["freshness_basis"].endswith("remains active.")
+
+
+def test_stale_news_candidate_is_dropped_but_current_historical_comparison_is_kept():
+    current_year = datetime.now(UTC).year
+    stale_year = current_year - 3
+    common = {
+        "excluded_topics": [],
+        "allowed_urls": set(),
+        "allowed_directions": {
+            "news", "industry_trend", "market_event", "evergreen_guide",
+            "buyer_question", "deep_analysis",
+        },
+        "allowed_types": {"blog", "market_analysis", "product_review", "guide", "news", "landing"},
+    }
+    candidates = AutomaticArticleWorkflow._clean_topic_candidates(
+        [
+            {
+                "topic": f"Hong Kong precious metals rules update {stale_year}",
+                "headline": f"{stale_year} Precious Metals Rules Update",
+                "content_direction": "news",
+                "page_type": "news",
+            },
+            {
+                "topic": (
+                    f"How Hong Kong compliance changed from {stale_year} to {current_year}"
+                ),
+                "headline": f"Hong Kong Compliance: {stale_year} vs {current_year}",
+                "content_direction": "deep_analysis",
+                "page_type": "market_analysis",
+            },
+        ],
+        **common,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["headline"] == (
+        f"Hong Kong Compliance: {stale_year} vs {current_year}"
+    )
+
+
+def test_recent_titles_are_scoped_to_the_same_website(tmp_path, monkeypatch):
+    monkeypatch.setattr(articles, "GENERATED_DIR", tmp_path)
+    records = [
+        {"id": "one", "website_url": "https://example.com/", "title": "Existing Guide", "topic": "Guide Topic"},
+        {"id": "two", "website_url": "https://other.example/", "title": "Other Site Article"},
+        {"id": "three", "website_url": "https://example.com/", "title": "Japanese Translation", "source_article_id": "one"},
+    ]
+    for record in records:
+        (tmp_path / f"{record['id']}.json").write_text(json.dumps(record), encoding="utf-8")
+
+    titles = articles._recent_titles_for_website("https://www.example.com/")
+
+    assert titles == ["Existing Guide", "Guide Topic"]
 
 
 REFERENCE_HTML = """<!doctype html>
@@ -126,6 +481,7 @@ def test_writing_brief_uses_validated_queries_and_reference_benchmarks():
 
     assert brief["benchmark"]["median_word_count"] == 2200
     assert brief["benchmark"]["median_image_count"] == 5
+    assert brief["image_count_min"] <= brief["image_count_max"]
     assert brief["target_queries"] == ["how to improve warehouse inventory accuracy"]
     assert "invented query with no evidence" not in brief["target_queries"]
 
@@ -279,6 +635,8 @@ async def test_editorial_ai_selects_supported_type_and_respects_topic_hint():
                 "page_type": "guide",
                 "reasoning": "Readers need an actionable sequence.",
                 "trend_angle": "New warehouse automation workflows",
+                "content_direction": "industry_trend",
+                "freshness_basis": "Current search results show new automation workflows.",
                 "search_intent": "informational",
                 "headline_options": ["A", "B", "C"],
                 "confidence": 0.9,
@@ -307,6 +665,9 @@ async def test_editorial_ai_selects_supported_type_and_respects_topic_hint():
     )
     assert decision.topic == "User-defined warehouse topic"
     assert decision.page_type == "guide"
+    assert decision.content_direction == "industry_trend"
+    assert "search results" in decision.freshness_basis
+    assert decision.topic_candidates[0]["topic"] == "User-defined warehouse topic"
     assert decision.confidence == 0.9
 
 
@@ -364,6 +725,8 @@ async def test_auto_generate_endpoint_saves_research_report(tmp_path, monkeypatc
 
         async def run(self, *args, **kwargs):
             assert kwargs["requested_page_type"] == "auto"
+            assert kwargs["excluded_topics"] == []
+            assert kwargs["content_direction"] == "auto"
             return research
 
         async def close(self):
@@ -399,7 +762,10 @@ async def test_auto_generate_endpoint_saves_research_report(tmp_path, monkeypatc
 
     app = FastAPI()
     app.include_router(articles.router)
-    app.state.settings = Settings(deepseek_api_key="test-key")
+    app.state.settings = Settings(
+        deepseek_api_key="test-key",
+        data_dir=tmp_path / "agent-data",
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
@@ -412,6 +778,8 @@ async def test_auto_generate_endpoint_saves_research_report(tmp_path, monkeypatc
     assert payload["research_report"]["profile"]["niche"] == "warehouse software"
     assert payload["page_type"] == "market_analysis"
     assert payload["topic"] == "How automation improves warehouse inventory accuracy"
+    assert payload["revision_count"] == 2
+    assert payload["quality_report"]["passed"] is False
     stored = json.loads((tmp_path / f"{payload['id']}.json").read_text(encoding="utf-8"))
     assert stored["research_report"]["references"][0]["word_count"] == 1200
     assert "<script" not in stored["html"]
@@ -429,6 +797,8 @@ async def test_research_requires_confirmation_before_article_generation(tmp_path
             "business_summary": "Example provides warehouse software.",
             "niche": "warehouse software",
             "keywords": ["warehouse inventory software"],
+            "primary_language": "en",
+            "detected_languages": ["en", "ja"],
         },
         "references": [{
             "url": "https://reference.example/guide",
@@ -489,10 +859,15 @@ async def test_research_requires_confirmation_before_article_generation(tmp_path
             assert "VERIFIED RESEARCH CONTEXT" in prompt
             assert "how to improve warehouse inventory accuracy" in prompt
             assert "Improvement process" in prompt
+            body = " ".join(["warehouse inventory accuracy guidance"] * 500)
             return (
                 "<html><head><title>Confirmed Warehouse Guide</title></head>"
                 "<body><article><h1>Confirmed Warehouse Guide</h1>"
-                "<p>Useful original guidance.</p></article></body></html>"
+                f"<p>Useful original guidance. {body}</p>"
+                "<h2>Accuracy problems</h2><p>Measure inventory discrepancies.</p>"
+                "<h2>Improvement process</h2><p>Apply a repeatable audit process.</p>"
+                "<h2>FAQ</h2><p>Review common implementation questions.</p>"
+                "</article></body></html>"
             )
 
         async def close(self):
@@ -507,12 +882,24 @@ async def test_research_requires_confirmation_before_article_generation(tmp_path
     research_dir.mkdir()
     monkeypatch.setattr(workflow_module, "AutomaticArticleWorkflow", FakeWorkflow)
     monkeypatch.setattr(deepseek_module, "DeepSeekClient", FakeDeepSeek)
+    async def fake_translate(settings, html, source_lang, target_lang, lang_names, label=""):
+        assert source_lang == "en"
+        assert target_lang == "ja"
+        return html.replace("Confirmed Warehouse Guide", "倉庫在庫ガイド").replace(
+            "Useful original guidance.",
+            "実用的なガイドです。",
+        )
+
+    monkeypatch.setattr(articles, "_do_translate", fake_translate)
     monkeypatch.setattr(articles, "GENERATED_DIR", generated_dir)
     monkeypatch.setattr(articles, "RESEARCH_DIR", research_dir)
 
     app = FastAPI()
     app.include_router(articles.router)
-    app.state.settings = Settings(deepseek_api_key="test-key")
+    app.state.settings = Settings(
+        deepseek_api_key="test-key",
+        data_dir=tmp_path / "agent-data",
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         research_response = await client.post(
@@ -522,6 +909,8 @@ async def test_research_requires_confirmation_before_article_generation(tmp_path
         assert research_response.status_code == 200
         research_payload = research_response.json()
         assert research_payload["status"] == "awaiting_confirmation"
+        assert research_payload["agent_stage"] == "awaiting_confirmation"
+        assert len(research_payload["agent_run_id"]) == 32
         assert research_payload["writing_brief"]["recommended_word_count"] == 1900
         assert not list(generated_dir.glob("*.html"))
 
@@ -535,13 +924,36 @@ async def test_research_requires_confirmation_before_article_generation(tmp_path
                 "outline": ["Accuracy problems", "Improvement process", "FAQ"],
             },
         )
+        generated_id = generation_response.json()["id"]
+        agent_response = await client.get(
+            f"/api/articles/agent-runs/{research_payload['agent_run_id']}"
+        )
+        reloaded_response = await client.get(f"/api/articles/{generated_id}")
+        duplicate_response = await client.post(
+            "/api/articles/generate-from-research",
+            json={"research_id": research_payload["research_id"]},
+        )
 
     assert generation_response.status_code == 200
     generated = generation_response.json()
     assert generated["title"] == "Confirmed Warehouse Guide"
     assert generated["confirmed_brief"]["confirmed_word_count"] == 2100
+    assert generated["language"] == "en"
+    assert generated["agent_run_id"] == research_payload["agent_run_id"]
+    assert generated["agent_stage"] == "article_ready"
+    assert agent_response.status_code == 200
+    assert agent_response.json()["article_id"] == generated["id"]
+    assert agent_response.json()["stage"] == "article_ready"
+    assert len(generated["translations"]) == 1
+    assert generated["translations"][0]["language"] == "ja"
+    assert 'lang="ja"' in generated["translations"][0]["html"]
     assert (generated_dir / f"{generated['id']}.html").is_file()
+    assert (generated_dir / f"{generated['translations'][0]['id']}.html").is_file()
+    assert reloaded_response.status_code == 200
+    assert reloaded_response.json()["translations"][0]["language"] == "ja"
+    assert duplicate_response.status_code == 409
     saved_plan = json.loads(
         (research_dir / f"{research_payload['research_id']}.json").read_text(encoding="utf-8")
     )
     assert saved_plan["status"] == "generated"
+    assert len(saved_plan["generated_article_ids"]) == 2

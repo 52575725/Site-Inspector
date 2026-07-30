@@ -1,8 +1,7 @@
-"""Auto-search relevant images for blog articles via free image APIs.
+"""Auto-search relevant, reusable images for blog articles.
 
-Uses Unsplash → Pexels → Pixabay as a fallback chain.
-All APIs have free tiers — no API key required for basic usage,
-but keys improve rate limits and are supported via Settings.
+Searches configured stock-photo APIs plus the keyless Openverse and Wikimedia
+Commons APIs. Results retain creator and license metadata for editorial review.
 """
 from __future__ import annotations
 
@@ -14,7 +13,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +29,7 @@ class ImageResult:
     thumb_url: str     # Thumbnail/preview URL
     alt_text: str      # Suggested alt text
     photographer: str  # Attribution
-    source: str        # "unsplash", "pexels", "pixabay"
+    source: str        # Library/provider name, such as "unsplash" or "flickr"
     width: int = 0
     height: int = 0
     page_url: str = ""
@@ -47,7 +46,7 @@ def search_images(
     pexels_key: str = "",
     pixabay_key: str = "",
 ) -> list[ImageResult]:
-    """Search for images across multiple free APIs with fallback chaining.
+    """Search multiple free APIs and interleave their results.
 
     Args:
         query: Search query (article topic / keywords).
@@ -59,62 +58,77 @@ def search_images(
     Returns:
         List of ImageResult objects (may be empty if all sources fail).
     """
-    results: list[ImageResult] = []
-
-    # Use official providers only. Random placeholder services are not search.
-    try:
-        unsplash = _search_unsplash(query, count, unsplash_key)
-        results.extend(unsplash)
-        logger.info(f"Unsplash: {len(unsplash)} results for '{query}'")
-    except Exception as e:
-        logger.debug(f"Unsplash failed: {e}")
-
-    if len(results) >= count:
-        return _deduplicate(results)[:count]
-
-    # Pexels fallback
-    remaining = count - len(results)
-    try:
-        pexels = _search_pexels(query, remaining, pexels_key)
-        results.extend(pexels)
-        logger.info(f"Pexels: {len(pexels)} results for '{query}'")
-    except Exception as e:
-        logger.debug(f"Pexels failed: {e}")
-
-    if len(results) >= count:
-        return _deduplicate(results)[:count]
-
-    # Pixabay fallback
-    remaining = count - len(results)
-    try:
-        pixabay = _search_pixabay(query, remaining, pixabay_key)
-        results.extend(pixabay)
-        logger.info(f"Pixabay: {len(pixabay)} results for '{query}'")
-    except Exception as e:
-        logger.debug(f"Pixabay failed: {e}")
-
-    if len(results) < count:
-        remaining = count - len(results)
+    source_results: list[list[ImageResult]] = []
+    providers = (
+        ("Unsplash", lambda: _search_unsplash(query, count, unsplash_key)),
+        ("Pexels", lambda: _search_pexels(query, count, pexels_key)),
+        ("Pixabay", lambda: _search_pixabay(query, count, pixabay_key)),
+        ("Openverse", lambda: _search_openverse(query, count)),
+        ("Wikimedia Commons", lambda: _search_wikimedia(query, count)),
+    )
+    for provider_name, search in providers:
         try:
-            commons = _search_wikimedia(query, remaining)
-            results.extend(commons)
-            logger.info(f"Wikimedia Commons: {len(commons)} results for '{query}'")
-        except Exception as e:
-            logger.debug(f"Wikimedia Commons failed: {e}")
+            provider_results = search()
+            if provider_results:
+                source_results.append(provider_results)
+            logger.info(
+                "%s: %s results for '%s'", provider_name, len(provider_results), query
+            )
+        except Exception as exc:
+            logger.debug("%s failed: %s", provider_name, exc)
 
-    return _deduplicate(results)[:count]
+    # Round-robin keeps one successful provider from filling the entire tray.
+    interleaved = []
+    max_results = max((len(group) for group in source_results), default=0)
+    for index in range(max_results):
+        for group in source_results:
+            if index < len(group):
+                interleaved.append(group[index])
+    return _deduplicate(interleaved)[:count]
 
 
 def _deduplicate(results: list[ImageResult]) -> list[ImageResult]:
     unique = []
     seen = set()
+    seen_families = set()
     for result in results:
         key = result.url.split("?")[0]
         if key in seen:
             continue
+        family = image_family_key(result)
+        if family and family in seen_families:
+            continue
         seen.add(key)
+        if family:
+            seen_families.add(family)
         unique.append(result)
     return unique
+
+
+def image_family_key(result: ImageResult | dict) -> str:
+    """Identify numbered Wikimedia photo series that show the same setup."""
+    if isinstance(result, dict):
+        provider = str(result.get("source") or result.get("provider") or "")
+        url = str(result.get("url") or result.get("thumbnail_url") or "")
+    else:
+        provider = result.source
+        url = result.url or result.thumb_url
+    if provider.casefold() != "wikimedia" or not url:
+        return ""
+
+    filename = unquote(urlparse(url).path.rsplit("/", 1)[-1])
+    filename = re.sub(r"^\d+px-", "", filename, flags=re.IGNORECASE)
+    stem = filename.rsplit(".", 1)[0]
+    family = re.sub(
+        r"(?:[\s_-]+(?:image|img|photo)?\s*\d{1,4})$",
+        "",
+        stem,
+        flags=re.IGNORECASE,
+    )
+    if family == stem:
+        return ""
+    normalized = re.sub(r"[^a-z0-9]+", " ", family.casefold()).strip()
+    return f"wikimedia-series:{normalized}" if len(normalized) >= 12 else ""
 
 
 def download_image(url: str, dest_dir: str | Path, filename: str | None = None) -> str | None:
@@ -394,6 +408,95 @@ def _search_pexels(query: str, count: int, api_key: str = "") -> list[ImageResul
     return results
 
 
+def _search_openverse(query: str, count: int) -> list[ImageResult]:
+    """Search commercially reusable images indexed by Openverse without a key."""
+    import json
+    import urllib.request
+
+    # Anonymous Openverse requests reject page sizes above 20.
+    page_size = min(max(count * 2, 10), 20)
+    url = (
+        "https://api.openverse.org/v1/images/"
+        f"?q={quote(query)}&page_size={page_size}&mature=false"
+        "&license_type=commercial"
+    )
+    request = urllib.request.Request(url, headers={
+        "Accept": "application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 Chrome/136.0 Safari/537.36 SiteInspector/1.0"
+        ),
+    })
+    with urllib.request.urlopen(request, timeout=15) as response:
+        data = json.loads(response.read().decode("utf-8"))
+
+    grouped: dict[str, list[ImageResult]] = {}
+    for item in data.get("results", []):
+        image_url = str(item.get("url") or "")
+        page_url = str(item.get("foreign_landing_url") or item.get("detail_url") or "")
+        license_code = str(item.get("license") or "").strip().lower()
+        license_version = str(item.get("license_version") or "").strip()
+        if not image_url or not page_url or not license_code:
+            continue
+        # Article assets are converted to WebP, so exclude licenses that ban
+        # derivatives as well as non-commercial reuse.
+        if "-nd" in license_code or "-nc" in license_code:
+            continue
+
+        title = str(item.get("title") or query)
+        tags = " ".join(
+            str(tag.get("name") or "")
+            for tag in item.get("tags") or []
+            if isinstance(tag, dict)
+        )
+        if not _matches_visual_intent(query, title, title, tags):
+            continue
+
+        if license_code == "cc0":
+            license_name = "CC0 1.0"
+        elif license_code in {"pdm", "publicdomain"}:
+            license_name = "Public Domain"
+        else:
+            suffix = f" {license_version}" if license_version else ""
+            license_name = f"CC {license_code.upper()}{suffix}"
+        license_url = str(item.get("license_url") or "")
+        if not license_url and license_code == "cc0":
+            license_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+        elif not license_url and license_code == "pdm":
+            license_url = "https://creativecommons.org/publicdomain/mark/1.0/"
+        elif not license_url and license_version:
+            license_url = (
+                f"https://creativecommons.org/licenses/{license_code}/{license_version}/"
+            )
+
+        source = str(item.get("source") or item.get("provider") or "openverse").lower()
+        if source in {"wikimedia", "wikimedia_commons"}:
+            continue
+        grouped.setdefault(source, []).append(ImageResult(
+            url=image_url,
+            thumb_url=str(item.get("thumbnail") or image_url),
+            alt_text=title[:180],
+            photographer=str(item.get("creator") or "Openverse contributor"),
+            source=source,
+            width=int(item.get("width") or 0),
+            height=int(item.get("height") or 0),
+            page_url=page_url,
+            license_name=license_name,
+            license_url=license_url,
+        ))
+
+    # Openverse aggregates many collections. Mix them before returning results.
+    results = []
+    max_results = max((len(group) for group in grouped.values()), default=0)
+    for index in range(max_results):
+        for group in grouped.values():
+            if index < len(group):
+                results.append(group[index])
+                if len(results) >= count:
+                    return results
+    return results
+
+
 def _search_wikimedia(query: str, count: int) -> list[ImageResult]:
     """Search Wikimedia Commons for attributable, reusable images."""
     import html
@@ -404,6 +507,7 @@ def _search_wikimedia(query: str, count: int) -> list[ImageResult]:
     results = []
     seen_urls = set()
     query_variants = _wikimedia_query_variants(query)
+    semantic_intent = query
     for search_query in query_variants[:3]:
         url = (
             "https://commons.wikimedia.org/w/api.php?action=query&generator=search"
@@ -439,8 +543,7 @@ def _search_wikimedia(query: str, count: int) -> list[ImageResult]:
             title = page.get("title", "").removeprefix("File:")
             description = meta("ImageDescription") or title or search_query
             categories = meta("Categories")
-            visual_intent = _visual_query_for(search_query) or search_query
-            if not _matches_visual_intent(visual_intent, title, description, categories):
+            if not _matches_visual_intent(semantic_intent, title, description, categories):
                 continue
             license_name = meta("LicenseShortName") or meta("UsageTerms")
             if not license_name:
@@ -567,33 +670,67 @@ def _visual_query_for(query: str) -> str:
     return visual_subject
 
 
+def broaden_image_query(query: str) -> str:
+    """Return a simpler visual scene while preserving the query's main intent."""
+    return _visual_query_for(query)
+
+
 def _matches_visual_intent(
     search_query: str,
     title: str,
     description: str,
     categories: str,
 ) -> bool:
-    """Reject obvious homonyms before an image reaches editorial review."""
+    """Require candidate metadata to cover the query's concrete visual concepts."""
     query = search_query.lower()
     candidate = f"{title} {description} {categories}".lower()
-    if "silver" in query and "silver" not in candidate:
-        return False
-    if any(term in query for term in ("bullion", "ingot")):
-        return any(term in candidate for term in ("bullion", "ingot"))
-    intent_groups = (
-        (("solar", "panel"), ("solar", "photovoltaic", "panel")),
-        (("aircraft",), ("aircraft", "airplane", "aeroplane", "air cargo")),
-        (("container", "ship"), ("container", "cargo ship", "container ship")),
-        (("customs",), ("customs", "cargo", "freight")),
-        (("cargo", "freight"), ("cargo", "freight", "logistics")),
-        (("mining",), ("mine", "mining", "ore")),
-        (("jewelry",), ("jewelry", "jewellery", "ring", "necklace")),
-        (("price", "chart"), ("price", "chart", "market graph")),
+    primary_description = f"{title} {description}".lower()
+    if "silver" in query:
+        gold_subject = re.search(
+            r"\b(?:gold bullion|gold ingot|ingot of gold|\d{3,4}-gold ingot)\b",
+            primary_description,
+        )
+        if gold_subject or ("gold" in primary_description and "silver" not in primary_description):
+            return False
+    concept_groups = (
+        (("silver",), ("silver",), True),
+        (("bullion", "ingot", "silver bar"), ("bullion", "ingot", "silver bar"), True),
+        (("packaging", "package", "tamper", "sealed"),
+         ("packaging", "package", "packed", "tamper", "sealed", "pallet", "crate"), True),
+        (("aircraft", "air cargo", "cargo plane", "airport"),
+         ("aircraft", "airplane", "aeroplane", "air cargo", "cargo plane", "airport", "boeing"), True),
+        (("container ship", "cargo ship", "sea freight"),
+         ("container ship", "cargo ship", "freighter", "vessel"), True),
+        (("port", "harbour", "harbor", "terminal"),
+         ("port", "harbour", "harbor", "terminal", "quay", "dock"), True),
+        (("customs",), ("customs", "custom house", "border control"), True),
+        (("officer", "agent", "inspector"),
+         ("officer", "agent", "inspector", "personnel", "official"), True),
+        (("inspect", "inspection", "checking", "examining"),
+         ("inspect", "inspection", "examin", "checking", "checked"), True),
+        (("document", "paperwork", "passport", "forms"),
+         ("document", "paperwork", "passport", "form", "declaration"), True),
+        (("security", "checkpoint"),
+         ("security", "checkpoint", "screening", "x-ray", "inspection"), True),
+        (("solar", "panel"), ("solar", "photovoltaic", "panel"), False),
+        (("mining", "mine"), ("mine", "mining", "ore"), True),
+        (("jewelry", "jewellery", "ring", "necklace"),
+         ("jewelry", "jewellery", "ring", "necklace"), True),
+        (("price", "chart", "graph"), ("price", "chart", "graph", "market"), True),
     )
-    for query_terms, candidate_terms in intent_groups:
-        if any(term in query for term in query_terms):
-            return any(term in candidate for term in candidate_terms)
-    return True
+    expected = 0
+    matched = 0
+    for query_terms, candidate_terms, required in concept_groups:
+        if not any(term in query for term in query_terms):
+            continue
+        expected += 1
+        if any(term in candidate for term in candidate_terms):
+            matched += 1
+        elif required:
+            return False
+    if expected == 0:
+        return True
+    return matched >= 1
 
 
 def _search_pixabay(query: str, count: int, api_key: str = "") -> list[ImageResult]:

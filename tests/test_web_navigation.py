@@ -23,6 +23,19 @@ def test_sidebar_omits_retired_manual_pages():
     assert 'href="/tools"' not in template
 
 
+def test_article_api_errors_are_rendered_as_readable_messages():
+    template = (
+        Path(__file__).parents[1] / "src" / "web" / "templates" / "articles.html"
+    ).read_text(encoding="utf-8")
+
+    assert "function apiErrorMessage(payload, fallback)" in template
+    assert "item.loc.join('.')" in template
+    assert "error.detail ||" not in template
+    assert "err.detail ||" not in template
+    assert template.count("new Error(apiErrorMessage(") == 8
+    assert "apiErrorMessage(err, 'failed')" in template
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("handler", "path"),

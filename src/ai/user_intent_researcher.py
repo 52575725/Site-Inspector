@@ -171,7 +171,7 @@ class UserIntentResearcher:
     ) -> UserIntentReport:
         """Run the full user-intent research pipeline."""
         website_url = await validate_public_http_url(website_url)
-        keywords = keywords[:6]  # bound network work to the strongest site themes
+        keywords = keywords[:8]  # bound network work while covering more distinct site themes
 
         # Phase 1: Search for real user queries per keyword
         all_keyword_intents = list(await asyncio.gather(*[
@@ -188,7 +188,7 @@ class UserIntentResearcher:
             keywords, language=language, site_name=site_name, niche=niche
         )
         self._merge_ai_queries(all_keyword_intents, ai_queries)
-        await self._validate_simulated_queries(all_keyword_intents, limit=18)
+        await self._validate_simulated_queries(all_keyword_intents, limit=12)
 
         # Phase 3: Generate article ideas from the enriched intents
         article_ideas = await self._generate_article_ideas(
@@ -272,7 +272,10 @@ class UserIntentResearcher:
         title = title.strip()
         if len(title) < 10 or len(title) > 200:
             return None
-        if keyword.casefold() not in title.casefold():
+        keyword_terms = self._matching_terms(keyword)
+        title_terms = self._matching_terms(title)
+        required_overlap = min(2, len(keyword_terms))
+        if not keyword_terms or len(keyword_terms & title_terms) < required_overlap:
             return None
 
         # Classify intent
@@ -306,6 +309,21 @@ class UserIntentResearcher:
             validation_status="search-observed",
             evidence_urls=[evidence_url] if evidence_url else [],
         )
+
+    @staticmethod
+    def _matching_terms(value: str) -> set[str]:
+        stopwords = {
+            "and", "for", "from", "how", "much", "near", "the", "to", "what",
+            "where", "with",
+        }
+        terms = set()
+        for token in re.findall(r"[a-z0-9]+", value.casefold()):
+            if len(token) < 3 or token in stopwords or token.isdigit():
+                continue
+            if len(token) > 3 and token.endswith("s"):
+                token = token[:-1]
+            terms.add(token)
+        return terms
 
     # ── Phase 2: AI-simulated user queries ──────────────────────────
 

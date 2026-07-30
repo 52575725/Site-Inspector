@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
-from urllib.parse import parse_qs, unquote, urljoin, urlparse
+import urllib.request
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse
 from xml.etree import ElementTree
 
 import httpx
@@ -72,7 +74,7 @@ def _parse_bing_html(html: str, query: str, limit: int) -> list[dict]:
         link = item.select_one("h2 a[href]")
         if link is None:
             continue
-        url = link.get("href", "")
+        url = _unwrap_bing_url(link.get("href", ""))
         if not url.startswith(("http://", "https://")):
             continue
         snippet_node = item.select_one(".b_caption p") or item.find("p")
@@ -88,10 +90,79 @@ def _parse_bing_html(html: str, query: str, limit: int) -> list[dict]:
     return results
 
 
+def _unwrap_bing_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.hostname not in {"bing.com", "www.bing.com"} or not parsed.path.startswith("/ck/"):
+        return url
+    encoded = parse_qs(parsed.query).get("u", [""])[0]
+    if not encoded.startswith("a1"):
+        return url
+    payload = encoded[2:]
+    try:
+        payload += "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return url
+    return decoded if decoded.startswith(("http://", "https://")) else url
+
+
+def _unwrap_yahoo_url(url: str) -> str:
+    match = re.search(r"/RU=([^/]+)/RK=", url)
+    if not match:
+        return url
+    decoded = unquote(match.group(1))
+    return decoded if decoded.startswith(("http://", "https://")) else url
+
+
+def _parse_yahoo_html(html: str, query: str, limit: int) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    for item in soup.select("div.algo"):
+        link = item.select_one(".compTitle a[href]")
+        title_node = item.select_one("h3")
+        if link is None or title_node is None:
+            continue
+        url = _unwrap_yahoo_url(link.get("href", ""))
+        if not url.startswith(("http://", "https://")):
+            continue
+        snippet_node = item.select_one(".compText p")
+        results.append({
+            "query": query,
+            "title": title_node.get_text(" ", strip=True)[:200],
+            "url": url,
+            "snippet": snippet_node.get_text(" ", strip=True)[:500] if snippet_node else "",
+            "provider": "yahoo",
+        })
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _fetch_yahoo_html(query: str, timeout: float) -> str:
+    url = "https://search.yahoo.com/search?" + urlencode({"p": query})
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/126 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read(3_000_000).decode("utf-8", "replace")
+
+
 _QUERY_STOPWORDS = {
     "a", "an", "and", "are", "best", "can", "do", "for", "from", "how",
     "i", "in", "is", "it", "of", "on", "or", "safely", "the", "to", "what",
     "where", "which", "with",
+}
+_QUERY_CONTEXT_TERMS = {
+    "best", "business", "buy", "company", "export", "find", "guide", "hong",
+    "industrial", "japan", "kong", "latest", "list", "online", "supplier",
+    "trend", "united", "use", "wholesale", "year",
 }
 
 
@@ -104,14 +175,23 @@ def _filter_relevant(results: list[dict], query: str) -> list[dict]:
     if not terms:
         return results
     required = 1 if len(terms) == 1 else 2
-    return [
-        result
-        for result in results
-        if len(terms & set(re.findall(
+    specific_terms = terms - _QUERY_CONTEXT_TERMS
+    relevant = []
+    for result in results:
+        primary_tokens = set(re.findall(
             r"[a-z0-9]+",
-            f"{result['title']} {result['snippet']} {result['url']}".casefold(),
-        ))) >= required
-    ]
+            f"{result['title']} {result['url']}".casefold(),
+        ))
+        all_tokens = primary_tokens | set(re.findall(
+            r"[a-z0-9]+",
+            result["snippet"].casefold(),
+        ))
+        if len(terms & all_tokens) < required:
+            continue
+        if specific_terms and not specific_terms & primary_tokens:
+            continue
+        relevant.append(result)
+    return relevant
 
 
 async def search_public_web(
@@ -139,17 +219,12 @@ async def search_public_web(
 
     try:
         async with semaphore:
-            response = await client.get(
-                "https://www.bing.com/search",
-                params={"q": query, "setlang": "en-us", "cc": "us"},
-                timeout=max(timeout, 20),
-            )
-        if response.status_code < 400:
-            results = _filter_relevant(_parse_bing_html(response.text, query, limit), query)
-            if results:
-                return results
+            html = await asyncio.to_thread(_fetch_yahoo_html, query, max(timeout, 20))
+        results = _filter_relevant(_parse_yahoo_html(html, query, limit), query)
+        if results:
+            return results
     except Exception as exc:
-        logger.info("Bing HTML search unavailable for %r: %s", query, exc)
+        logger.info("Yahoo search unavailable for %r: %s", query, exc)
 
     try:
         async with semaphore:
@@ -159,9 +234,23 @@ async def search_public_web(
                 timeout=max(timeout, 20),
             )
         if response.status_code < 400:
-            return _filter_relevant(_parse_bing_rss(response.text, query, limit), query)
+            results = _filter_relevant(_parse_bing_rss(response.text, query, limit), query)
+            if results:
+                return results
     except Exception as exc:
         logger.info("Bing RSS search unavailable for %r: %s", query, exc)
+
+    try:
+        async with semaphore:
+            response = await client.get(
+                "https://www.bing.com/search",
+                params={"q": query, "setlang": "en-us", "cc": "us"},
+                timeout=max(timeout, 20),
+            )
+        if response.status_code < 400:
+            return _filter_relevant(_parse_bing_html(response.text, query, limit), query)
+    except Exception as exc:
+        logger.info("Bing HTML search unavailable for %r: %s", query, exc)
     return []
 
 

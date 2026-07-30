@@ -7,6 +7,9 @@ from src.integrations.web_search import (
     _filter_relevant,
     _parse_bing_html,
     _parse_bing_rss,
+    _parse_yahoo_html,
+    _unwrap_bing_url,
+    _unwrap_yahoo_url,
     suggest_public_queries,
 )
 
@@ -43,6 +46,44 @@ def test_bing_html_parser_and_relevance_filter_reject_generic_buy_results():
     assert len(relevant) == 1
     assert relevant[0]["url"] == "https://silver.example/guide"
     assert relevant[0]["provider"] == "bing"
+
+
+def test_relevance_filter_rejects_geography_only_result():
+    results = [{
+        "query": "Hong Kong silver exporters for industrial use",
+        "title": "Hong Kong - Wikipedia",
+        "url": "https://en.wikipedia.org/wiki/Hong_Kong",
+        "snippet": "Hong Kong is a city with industrial businesses.",
+        "provider": "yahoo",
+    }]
+
+    assert _filter_relevant(results, results[0]["query"]) == []
+
+
+def test_bing_tracking_url_is_unwrapped_to_the_real_target():
+    target = "https://www.lbma.org.uk/prices-and-data"
+    import base64
+    encoded = base64.urlsafe_b64encode(target.encode()).decode().rstrip("=")
+    wrapped = f"https://www.bing.com/ck/a?u=a1{encoded}&ntb=1"
+
+    assert _unwrap_bing_url(wrapped) == target
+
+
+def test_yahoo_result_parser_unwraps_target_and_keeps_structure():
+    target = "https://bullion.example/lbma-guide"
+    wrapped = (
+        "https://r.search.yahoo.com/path/RU="
+        "https%3A%2F%2Fbullion.example%2Flbma-guide/RK=2/RS=test"
+    )
+    html = f"""<div class="algo"><div class="compTitle"><a href="{wrapped}">
+    <h3>Why LBMA Approval Matters for Silver Bars</h3></a></div>
+    <div class="compText"><p>LBMA standards for silver bullion buyers.</p></div></div>"""
+
+    results = _parse_yahoo_html(html, "why LBMA silver bars matter", 5)
+
+    assert _unwrap_yahoo_url(wrapped) == target
+    assert results[0]["url"] == target
+    assert results[0]["provider"] == "yahoo"
 
 
 @pytest.mark.asyncio

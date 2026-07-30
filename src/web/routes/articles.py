@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -25,6 +27,12 @@ RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
 ARTICLE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 
 
+def _article_orchestrator(settings):
+    from src.agents.article_orchestrator import ArticleOrchestratorAgent
+
+    return ArticleOrchestratorAgent(settings.data_dir / "article-agent-runs")
+
+
 class GenerateRequest(BaseModel):
     topic: str
     keywords: str = ""
@@ -39,9 +47,10 @@ class AutoGenerateRequest(BaseModel):
     website_url: str = Field(min_length=4, max_length=2048)
     topic: str = Field(default="", max_length=300)
     keywords: str = Field(default="", max_length=1000)
-    language: str = "en"
+    language: str = "auto"
     word_count: int = Field(default=1200, ge=300, le=3000)
     page_type: str = "auto"
+    content_direction: str = Field(default="auto", max_length=40)
     max_reference_articles: int = Field(default=5, ge=1, le=8)
 
 
@@ -50,7 +59,10 @@ class GenerateFromResearchRequest(BaseModel):
     headline: str = Field(default="", max_length=300)
     word_count: int | None = Field(default=None, ge=300, le=5000)
     page_type: str = Field(default="", max_length=40)
+    content_direction: str = Field(default="", max_length=40)
     outline: list[str] = Field(default_factory=list, max_length=12)
+    target_languages: list[str] | None = Field(default=None, max_length=6)
+    auto_translate: bool = True
 
 
 class TranslateRequest(BaseModel):
@@ -192,6 +204,16 @@ HTML to translate:
     result = _extract_html(raw)
     logger.info(f"Translated {len(html_content)}→{len(result)} chars {label}")
     return result
+
+
+def _set_html_language(html_content: str, language: str) -> str:
+    """Set the document language without changing translated article structure."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html_content, "html.parser")
+    if soup.html:
+        soup.html["lang"] = language
+    return str(soup)
 
 
 @router.post("/api/articles/translate")
@@ -520,6 +542,40 @@ def _research_plan_path(research_id: str) -> Path:
     return path
 
 
+def _recent_titles_for_website(website_url: str, *, limit: int = 30) -> list[str]:
+    """Return recent primary-article titles for the same website."""
+    def normalized_host(value: str) -> str:
+        host = (urlparse(value).hostname or "").lower()
+        return host[4:] if host.startswith("www.") else host
+
+    target_host = normalized_host(website_url)
+    if not target_host:
+        return []
+    titles: list[str] = []
+    files = sorted(
+        GENERATED_DIR.glob("*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("source_article_id"):
+            continue
+        article_host = normalized_host(str(data.get("website_url", "")))
+        if article_host != target_host:
+            continue
+        for value in (data.get("title"), data.get("topic")):
+            cleaned = " ".join(str(value or "").split())[:300]
+            if cleaned and cleaned.casefold() not in {item.casefold() for item in titles}:
+                titles.append(cleaned)
+                if len(titles) >= limit:
+                    return titles
+    return titles
+
+
 @router.post("/api/articles/research")
 async def research_article_plan(request: Request, body: AutoGenerateRequest):
     """Research a site, real-language queries, and competitors without writing an article."""
@@ -529,7 +585,10 @@ async def research_article_plan(request: Request, body: AutoGenerateRequest):
 
     from src.ai.automatic_article import AutomaticArticleWorkflow
 
+    agent = _article_orchestrator(settings)
+    agent_state = agent.start(body.website_url, body.model_dump())
     workflow = AutomaticArticleWorkflow(settings)
+    excluded_topics = _recent_titles_for_website(body.website_url)
     try:
         research = await workflow.run(
             body.website_url,
@@ -538,13 +597,18 @@ async def research_article_plan(request: Request, body: AutoGenerateRequest):
             keyword_hint=body.keywords,
             requested_page_type=body.page_type,
             max_reference_articles=body.max_reference_articles,
+            excluded_topics=excluded_topics,
+            content_direction=body.content_direction,
         )
         generation_context = workflow.build_generation_context(research)
-    except HTTPException:
+    except HTTPException as exc:
+        agent.fail(agent_state, str(exc.detail))
         raise
     except ValueError as exc:
+        agent.fail(agent_state, str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        agent.fail(agent_state, str(exc))
         logger.error("Article research failed: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=502,
@@ -555,12 +619,15 @@ async def research_article_plan(request: Request, body: AutoGenerateRequest):
 
     research_id = uuid.uuid4().hex
     report = research.to_dict()
+    agent_state = agent.complete_research(agent_state, research_id, report)
     plan_data = {
         "id": research_id,
         "status": "awaiting_confirmation",
         "request": body.model_dump(),
         "research_report": report,
         "generation_context": generation_context,
+        "agent_run_id": agent_state.run_id,
+        "excluded_existing_titles": excluded_topics,
         "created_at": datetime.now(UTC).isoformat(),
     }
     RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
@@ -573,6 +640,8 @@ async def research_article_plan(request: Request, body: AutoGenerateRequest):
         "status": plan_data["status"],
         "research_report": report,
         "writing_brief": report.get("writing_brief", {}),
+        "agent_run_id": agent_state.run_id,
+        "agent_stage": agent_state.stage,
     }
 
 
@@ -593,12 +662,58 @@ async def generate_article_from_research(
         plan_data = json.loads(plan_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=500, detail="Research plan is invalid") from exc
+    if plan_data.get("status") == "generated":
+        raise HTTPException(
+            status_code=409,
+            detail="This research plan already generated an article. Start new research for a different topic.",
+        )
+
+    agent = _article_orchestrator(settings)
+    agent_run_id = str(plan_data.get("agent_run_id", ""))
+    try:
+        agent_state = agent.load(agent_run_id)
+    except (FileNotFoundError, ValueError):
+        request_data = plan_data.get("request", {})
+        agent_state = agent.start(
+            str(request_data.get("website_url", "")),
+            request_data,
+        )
+        agent_state.research_id = body.research_id
+    agent_state = agent.begin_writing(agent_state)
 
     report = plan_data.get("research_report", {})
     brief = dict(report.get("writing_brief", {}))
     request_data = plan_data.get("request", {})
+    profile = report.get("profile", {})
+    primary_language = profile.get("primary_language") or request_data.get("language", "en")
+    if primary_language not in LANG_NAMES:
+        primary_language = "en"
+    detected_languages = [
+        language for language in profile.get("detected_languages", [])
+        if language in LANG_NAMES
+    ]
+    requested_targets = (
+        body.target_languages
+        if body.target_languages is not None
+        else [language for language in detected_languages if language != primary_language]
+    )
+    target_languages = []
+    if body.auto_translate:
+        for language in requested_targets:
+            if language in LANG_NAMES and language != primary_language and language not in target_languages:
+                target_languages.append(language)
+    target_languages = target_languages[:5]
     allowed_types = {"blog", "market_analysis", "product_review", "guide", "news", "landing"}
+    allowed_directions = {
+        "news", "industry_trend", "market_event", "evergreen_guide",
+        "buyer_question", "deep_analysis",
+    }
     page_type = body.page_type if body.page_type in allowed_types else brief.get("page_type", "blog")
+    content_direction = (
+        body.content_direction
+        if body.content_direction in allowed_directions
+        else brief.get("content_direction", "evergreen_guide")
+    )
     headline = body.headline.strip() or next(
         iter(brief.get("headline_options", [])),
         brief.get("topic", "Article"),
@@ -612,12 +727,13 @@ async def generate_article_from_research(
         "confirmed_headline": headline,
         "confirmed_word_count": word_count,
         "confirmed_page_type": page_type,
+        "confirmed_content_direction": content_direction,
         "confirmed_outline": outline,
     }
     prompt = _build_article_prompt(
         topic=headline,
         keywords=", ".join(brief.get("target_keywords", [])),
-        language=request_data.get("language", "en"),
+        language=primary_language,
         word_count=word_count,
         page_type=page_type,
         site_research=(
@@ -627,31 +743,45 @@ async def generate_article_from_research(
         ),
     )
 
-    from src.ai.deepseek_client import DeepSeekClient
+    from src.agents.writing_agent import ArticleWritingAgent, WritingTask
 
-    ai = DeepSeekClient(
-        api_key=settings.deepseek_api_key,
-        model=settings.deepseek_model,
-        timeout=max(settings.deepseek_timeout, 180),
+    writing_agent = ArticleWritingAgent(settings)
+    writing_task = WritingTask(
+        prompt=prompt,
+        page_type=page_type,
+        content_direction=content_direction,
+        language=primary_language,
     )
+    revision_count = 0
     try:
-        raw = await ai.generate_text(
-            prompt,
-            system=(
-                "You are an expert SEO content writer. Follow the user-confirmed brief, "
-                "answer validated user queries, cite only verified authority URLs, and never "
-                "copy reference wording. Output valid HTML only."
-            ),
-            temperature=0.55,
-            max_tokens=7000,
+        raw = await writing_agent.write(writing_task)
+        html_content = _sanitize_generated_html(_extract_html(raw))
+        quality_preview = agent.quality_agent.inspect_content(
+            html_content,
+            research_report=report,
+            expected_word_count=word_count,
         )
+        while not quality_preview.passed and revision_count < 2:
+            issues = [
+                check.message
+                for check in quality_preview.checks
+                if not check.passed and check.severity == "error"
+            ]
+            raw = await writing_agent.revise(writing_task, html_content, issues)
+            revision_count += 1
+            html_content = _sanitize_generated_html(_extract_html(raw))
+            quality_preview = agent.quality_agent.inspect_content(
+                html_content,
+                research_report=report,
+                expected_word_count=word_count,
+            )
     except Exception as exc:
+        agent.fail(agent_state, str(exc))
         logger.error("Confirmed article generation failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=502, detail="Research is saved, but article generation failed.") from exc
     finally:
-        await ai.close()
+        await writing_agent.close()
 
-    html_content = _sanitize_generated_html(_extract_html(raw))
     title = _extract_title(html_content) or headline
     article_id = uuid.uuid4().hex[:12]
     created_at = datetime.now(UTC).isoformat()
@@ -659,25 +789,117 @@ async def generate_article_from_research(
         "id": article_id,
         "research_id": body.research_id,
         "website_url": report.get("profile", {}).get("website_url", ""),
-        "topic": brief.get("topic", headline),
+        "topic": headline,
         "keywords": ", ".join(brief.get("target_keywords", [])),
-        "language": request_data.get("language", "en"),
+        "language": primary_language,
         "page_type": page_type,
+        "content_direction": content_direction,
         "title": title,
         "html": html_content,
         "confirmed_brief": confirmed_brief,
         "research_report": report,
         "created_at": created_at,
         "pushed": False,
+        "translation_group_id": article_id,
+        "translations": [],
+        "agent_run_id": agent_state.run_id,
+        "revision_count": revision_count,
     }
     (GENERATED_DIR / f"{article_id}.json").write_text(
         json.dumps(article_data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     (GENERATED_DIR / f"{article_id}.html").write_text(html_content, encoding="utf-8")
+
+    async def create_translation(target_language: str) -> tuple[dict | None, dict | None]:
+        try:
+            translated = await _do_translate(
+                settings,
+                html_content,
+                primary_language,
+                target_language,
+                LANG_NAMES,
+                f"generated article {article_id}",
+            )
+            translated_html = _set_html_language(
+                _sanitize_generated_html(translated),
+                target_language,
+            )
+            translation_id = uuid.uuid4().hex[:12]
+            translation_title = _extract_title(translated_html) or title
+            translation_data = {
+                "id": translation_id,
+                "research_id": body.research_id,
+                "website_url": article_data["website_url"],
+                "topic": article_data["topic"],
+                "keywords": article_data["keywords"],
+                "language": target_language,
+                "source_language": primary_language,
+                "page_type": page_type,
+                "content_direction": content_direction,
+                "title": translation_title,
+                "html": translated_html,
+                "source_html": html_content,
+                "source_article_id": article_id,
+                "translation_group_id": article_id,
+                "confirmed_brief": confirmed_brief,
+                "research_report": report,
+                "created_at": datetime.now(UTC).isoformat(),
+                "pushed": False,
+            }
+            (GENERATED_DIR / f"{translation_id}.json").write_text(
+                json.dumps(translation_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            (GENERATED_DIR / f"{translation_id}.html").write_text(
+                translated_html,
+                encoding="utf-8",
+            )
+            return translation_data, None
+        except Exception as exc:
+            logger.error(
+                "Translation of article %s to %s failed: %s",
+                article_id,
+                target_language,
+                exc,
+                exc_info=True,
+            )
+            return None, {"language": target_language, "error": str(exc)[:200]}
+
+    translation_results = await asyncio.gather(*(
+        create_translation(language) for language in target_languages
+    )) if quality_preview.passed else []
+    translations = [result for result, _ in translation_results if result]
+    translation_errors = [error for _, error in translation_results if error]
+    article_data["translations"] = [
+        {"id": item["id"], "language": item["language"], "title": item["title"]}
+        for item in translations
+    ]
+    (GENERATED_DIR / f"{article_id}.json").write_text(
+        json.dumps(article_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    agent_state = agent.complete_writing(
+        agent_state,
+        article_data,
+        revision_count=revision_count,
+    )
+    article_data["agent_stage"] = agent_state.stage
+    article_data["quality_report"] = (
+        agent_state.content_quality.model_dump()
+        if agent_state.content_quality
+        else {}
+    )
+    (GENERATED_DIR / f"{article_id}.json").write_text(
+        json.dumps(article_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     plan_data["status"] = "generated"
     plan_data["generated_article_id"] = article_id
+    plan_data["generated_article_ids"] = [article_id, *[item["id"] for item in translations]]
+    plan_data["translation_errors"] = translation_errors
     plan_data["confirmed_brief"] = confirmed_brief
+    plan_data["agent_run_id"] = agent_state.run_id
     plan_path.write_text(json.dumps(plan_data, ensure_ascii=False, indent=2), encoding="utf-8")
     return {
         "id": article_id,
@@ -687,9 +909,26 @@ async def generate_article_from_research(
         "created_at": created_at,
         "topic": article_data["topic"],
         "page_type": page_type,
+        "language": primary_language,
+        "translations": translations,
+        "translation_errors": translation_errors,
         "confirmed_brief": confirmed_brief,
         "research_report": report,
+        "agent_run_id": agent_state.run_id,
+        "agent_stage": agent_state.stage,
+        "quality_report": article_data["quality_report"],
+        "revision_count": revision_count,
     }
+
+
+@router.get("/api/articles/agent-runs/{run_id}")
+async def get_article_agent_run(request: Request, run_id: str):
+    """Return the persisted decisions and joint quality checks for one article run."""
+    try:
+        state = _article_orchestrator(request.app.state.settings).load(run_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return state.model_dump(mode="json")
 
 
 @router.post("/api/articles/auto-generate")
@@ -700,9 +939,9 @@ async def auto_generate_article(request: Request, body: AutoGenerateRequest):
         raise HTTPException(status_code=400, detail="DeepSeek API key not configured")
 
     from src.ai.automatic_article import AutomaticArticleWorkflow
-    from src.ai.deepseek_client import DeepSeekClient
 
     workflow = AutomaticArticleWorkflow(settings)
+    excluded_topics = _recent_titles_for_website(body.website_url)
     try:
         research = await workflow.run(
             body.website_url,
@@ -711,6 +950,8 @@ async def auto_generate_article(request: Request, body: AutoGenerateRequest):
             keyword_hint=body.keywords,
             requested_page_type=body.page_type,
             max_reference_articles=body.max_reference_articles,
+            excluded_topics=excluded_topics,
+            content_direction=body.content_direction,
         )
     except HTTPException:
         raise
@@ -738,21 +979,41 @@ async def auto_generate_article(request: Request, body: AutoGenerateRequest):
         site_research=AutomaticArticleWorkflow.build_generation_context(research),
     )
 
-    ai = DeepSeekClient(
-        api_key=settings.deepseek_api_key,
-        model=settings.deepseek_model,
-        timeout=max(settings.deepseek_timeout, 180),
+    from src.agents.quality_agent import ArticleQualityAgent
+    from src.agents.writing_agent import ArticleWritingAgent, WritingTask
+
+    writing_agent = ArticleWritingAgent(settings)
+    writing_task = WritingTask(
+        prompt=prompt,
+        page_type=page_type,
+        content_direction=research.editorial_decision.content_direction,
+        language=profile.primary_language,
     )
+    quality_agent = ArticleQualityAgent()
+    research_report = research.to_dict()
+    revision_count = 0
     try:
-        raw = await ai.generate_text(
-            prompt,
-            system=(
-                "You are an expert SEO content writer. Produce original, useful HTML grounded "
-                "in the supplied site evidence. Never copy reference-article wording."
-            ),
-            temperature=0.6,
-            max_tokens=6000,
+        raw = await writing_agent.write(writing_task)
+        html_content = _sanitize_generated_html(_extract_html(raw))
+        quality_report = quality_agent.inspect_content(
+            html_content,
+            research_report=research_report,
+            expected_word_count=body.word_count,
         )
+        while not quality_report.passed and revision_count < 2:
+            issues = [
+                check.message
+                for check in quality_report.checks
+                if not check.passed and check.severity == "error"
+            ]
+            raw = await writing_agent.revise(writing_task, html_content, issues)
+            revision_count += 1
+            html_content = _sanitize_generated_html(_extract_html(raw))
+            quality_report = quality_agent.inspect_content(
+                html_content,
+                research_report=research_report,
+                expected_word_count=body.word_count,
+            )
     except Exception as exc:
         logger.error("Automatic article generation failed: %s", exc, exc_info=True)
         raise HTTPException(
@@ -760,13 +1021,11 @@ async def auto_generate_article(request: Request, body: AutoGenerateRequest):
             detail="研究已完成，但 AI 文章生成失败，请稍后重试。",
         ) from exc
     finally:
-        await ai.close()
+        await writing_agent.close()
 
-    html_content = _sanitize_generated_html(_extract_html(raw))
     title = _extract_title(html_content) or topic
     article_id = uuid.uuid4().hex[:12]
     created_at = datetime.now(UTC).isoformat()
-    research_report = research.to_dict()
     article_data = {
         "id": article_id,
         "website_url": profile.website_url,
@@ -778,6 +1037,8 @@ async def auto_generate_article(request: Request, body: AutoGenerateRequest):
         "title": title,
         "html": html_content,
         "research_report": research_report,
+        "quality_report": quality_report.model_dump(),
+        "revision_count": revision_count,
         "created_at": created_at,
         "pushed": False,
     }
@@ -794,6 +1055,8 @@ async def auto_generate_article(request: Request, body: AutoGenerateRequest):
         "topic": topic,
         "page_type": page_type,
         "research_report": research_report,
+        "quality_report": quality_report.model_dump(),
+        "revision_count": revision_count,
     }
 
 
@@ -930,6 +1193,21 @@ async def get_article(request: Request, article_id: str):
     if data.get("images"):
         from src.web.routes.article_images import _display_generated_html
         data["html"] = _display_generated_html(article_id, data["html"])
+    translation_versions = []
+    for reference in data.get("translations", []):
+        translation_id = str(reference.get("id", ""))
+        if not ARTICLE_ID_RE.fullmatch(translation_id):
+            continue
+        translation_path = GENERATED_DIR / f"{translation_id}.json"
+        if not translation_path.is_file():
+            continue
+        translation = json.loads(translation_path.read_text(encoding="utf-8-sig"))
+        if translation.get("images"):
+            from src.web.routes.article_images import _display_generated_html
+            translation["html"] = _display_generated_html(translation_id, translation["html"])
+        translation_versions.append(translation)
+    if translation_versions:
+        data["translations"] = translation_versions
     return data
 
 
@@ -994,6 +1272,19 @@ async def push_article(request: Request, article_id: str, body: PushRequest):
             detail="Target path must stay inside the repository",
         ) from exc
 
+    orchestrator = None
+    agent_state = None
+    agent_run_id = str(data.get("agent_run_id", ""))
+    if agent_run_id:
+        orchestrator = _article_orchestrator(request.app.state.settings)
+        try:
+            agent_state = orchestrator.begin_publishing(
+                orchestrator.load(agent_run_id),
+                repo_url,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     errors: list[str] = []
 
     try:
@@ -1055,6 +1346,9 @@ async def push_article(request: Request, article_id: str, body: PushRequest):
             if "nothing to commit" not in err_text.lower():
                 errors.append(f"提交失败: {err_text}")
 
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
         # Push
         code, _, stderr = await git("push", "origin", branch_name)
         if code != 0:
@@ -1092,13 +1386,27 @@ async def push_article(request: Request, article_id: str, body: PushRequest):
         data["pr_url"] = pr_url
         data["repo_url"] = repo_url
         data["pushed_at"] = datetime.utcnow().isoformat()
+        if orchestrator and agent_state:
+            agent_state = orchestrator.complete_publishing(agent_state, pr_url)
+            data["agent_stage"] = agent_state.stage
         file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        return {"success": True, "pr_url": pr_url}
+        return {
+            "success": True,
+            "pr_url": pr_url,
+            "agent_run_id": agent_run_id,
+            "agent_stage": agent_state.stage if agent_state else "",
+        }
 
     except Exception as e:
+        if orchestrator and agent_state:
+            orchestrator.fail(agent_state, str(e))
         logger.error(f"Article push failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="推送失败，请检查仓库地址和网络连接后重试。")
+        safe_error = re.sub(r"https://[^@\s]+@", "https://***@", str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"推送失败: {safe_error[:500]}",
+        ) from e
     finally:
         if work_dir.exists():
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -1306,7 +1614,8 @@ Target Word Count: ~{word_count} words
 {f"Suggested Structure: {structure_hint}" if structure_hint else ""}
 
 CRITICAL RULES:
-- Today's date is {today} — use this exact date in the content (NOT "[today]" placeholder)
+- Today's date is {today}; use it for publication metadata, not as a reason to make
+  unsupported claims sound current
 - Do NOT include author name, byline, or author information anywhere
 - Do NOT include <meta name="author"> tag
 - Do NOT include author in JSON-LD schema
@@ -1333,10 +1642,10 @@ Output — return ONLY valid HTML (no markdown fences, no explanations):
 <header>
 <h1>[Compelling H1 with primary keyword]</h1>
 <p class="article-date">Published: {today}</p>
-<p class="article-type">Category: {type_label}</p>
 </header>
 
-<!-- Article body with proper H2 sections, paragraphs, lists, and data as appropriate -->
+<!-- Open with the reader's concrete question, situation, or verified fact. Follow the
+confirmed outline when one is supplied; otherwise create specific, non-generic H2 sections. -->
 
 </article>
 </body>
@@ -1345,13 +1654,19 @@ Output — return ONLY valid HTML (no markdown fences, no explanations):
 
 IMPORTANT:
 - Replace ALL placeholder brackets [...] with actual content
-- Use "{today}" as the publication date everywhere (in text, schema, meta)
+- Use "{today}" as the publication date in visible metadata and schema
 - Write in {lang_name}
 - Target ~{word_count} words for body content
-- Follow the suggested {type_label} structure
+- Treat the suggested {type_label} structure as guidance, not a mandatory template
 - Naturally include keywords without stuffing
 - Use proper heading hierarchy (H1 → H2 → no skips)
-- Include specific examples, data, or practical insights
+- Start directly; do not use generic scene-setting such as "in today's rapidly changing world"
+- Make every H2 contribute distinct facts, mechanisms, examples, trade-offs, or actions
+- Prefer concrete explanations over claims such as "crucial", "revolutionary", or
+  "industry-leading"
+- Include data only when the verified research context supplies a source that supports it
 - Do not invent facts about the site; use only the verified site context above
+- Do not invent personal experience, customer stories, interviews, quotations, statistics,
+  prices, typical ranges, rankings, records, or market trends
 - Treat reference articles as structural research only and never copy their wording
 - Output RAW HTML only — no markdown backticks, no explanations"""

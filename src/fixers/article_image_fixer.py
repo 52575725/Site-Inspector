@@ -342,6 +342,7 @@ class ArticleImageFixer(BaseFixer):
             image = images[image_index]
             section = sections[section_index]
             anchor = section["anchor"]
+            image["target_heading"] = section["heading"].get_text(" ", strip=True)
             figure = BeautifulSoup(
                 self._build_figure_tag(image, is_hero=False), "html.parser",
             )
@@ -360,6 +361,7 @@ class ArticleImageFixer(BaseFixer):
             h1 = main.find("h1")
             intro = h1.find_next("p") if h1 else main.find("p")
             anchor = intro or h1
+            image["target_heading"] = h1.get_text(" ", strip=True) if h1 else "Introduction"
             figure = BeautifulSoup(
                 self._build_figure_tag(image, is_hero=True), "html.parser",
             )
@@ -379,14 +381,17 @@ class ArticleImageFixer(BaseFixer):
             ]
             anchors = self._distributed_anchors(main, available_h2, len(remaining))
             for (_, image), anchor in zip(remaining, anchors):
-                figure = BeautifulSoup(
-                    self._build_figure_tag(image, is_hero=False), "html.parser",
-                )
-                anchor.insert_after(figure)
                 heading = (
                     anchor if getattr(anchor, "name", None) == "h2"
                     else anchor.find_previous("h2")
                 )
+                image["target_heading"] = (
+                    heading.get_text(" ", strip=True) if heading else "Article body"
+                )
+                figure = BeautifulSoup(
+                    self._build_figure_tag(image, is_hero=False), "html.parser",
+                )
+                anchor.insert_after(figure)
                 image["placement_heading"] = (
                     heading.get_text(" ", strip=True) if heading else "Article body"
                 )
@@ -456,6 +461,11 @@ class ArticleImageFixer(BaseFixer):
     ) -> dict[int, int]:
         scored_pairs = []
         for image_index, image in enumerate(images):
+            target_heading = " ".join(str(image.get("target_heading", "")).split()).casefold()
+            try:
+                target_section_index = int(image.get("target_section_index", -1))
+            except (TypeError, ValueError):
+                target_section_index = -1
             query_terms = cls._semantic_terms(str(image.get("query", "")))
             description_text = " ".join(
                 str(image.get(key, "")) for key in ("alt_text", "caption")
@@ -464,6 +474,12 @@ class ArticleImageFixer(BaseFixer):
             image_terms = query_terms | description_terms
             for section_index, section in enumerate(sections):
                 heading_text = section["heading"].get_text(" ", strip=True)
+                if target_heading and heading_text.casefold() == target_heading:
+                    scored_pairs.append((10_000, image_index, section_index))
+                    continue
+                if target_section_index == section_index:
+                    scored_pairs.append((9_000, image_index, section_index))
+                    continue
                 heading_terms = cls._semantic_terms(heading_text)
                 section_terms = cls._semantic_terms(section["text"])
                 query_heading_overlap = query_terms & heading_terms
@@ -571,6 +587,12 @@ class ArticleImageFixer(BaseFixer):
         width = image.get("width", 800)
         height = image.get("height", 600)
         source = image.get("source", "")
+        target_heading = html.escape(str(image.get("target_heading", "")), quote=True)
+        image_type = html.escape(str(image.get("image_type", "photo")), quote=True)
+        image_purpose = html.escape(str(image.get("insertion_reason", "")), quote=True)
+        target_section_index = html.escape(
+            str(image.get("target_section_index", -1)), quote=True,
+        )
         photographer = image.get("photographer", "")
         page_url = html.escape(image.get("page_url", ""), quote=True)
         license_name = html.escape(image.get("license_name", ""))
@@ -592,7 +614,10 @@ class ArticleImageFixer(BaseFixer):
             )
         credit_html = f'<span class="article-image-credit">{" / ".join(credits)}</span>' if credits else ""
         return (
-            f'<figure class="article-media{(" article-media-hero" if is_hero else "")}">'
+            f'<figure class="article-media{(" article-media-hero" if is_hero else "")}" '
+            f'data-target-heading="{target_heading}" data-image-type="{image_type}" '
+            f'data-image-purpose="{image_purpose}" '
+            f'data-target-section-index="{target_section_index}">'
             f'<img src="{src}" alt="{alt}" width="{width}" height="{height}" '
             f'loading="{loading}" decoding="async"{priority}>'
             f'<figcaption>{caption}{credit_html}</figcaption></figure>'

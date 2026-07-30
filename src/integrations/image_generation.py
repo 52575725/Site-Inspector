@@ -28,9 +28,9 @@ class OpenAIImageGenerator:
             "model": self.model,
             "prompt": prompt,
             "size": "1536x1024",
-            "quality": "medium",
+            "quality": "high",
             "output_format": "webp",
-            "output_compression": 82,
+            "output_compression": 88,
             "n": 1,
         }
         try:
